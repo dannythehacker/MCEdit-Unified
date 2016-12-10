@@ -532,7 +532,7 @@ class MCEdit(GLViewport):
                             albow.dialogs.ask_tied_to._visible = True
                             answer = albow.dialogs.ask_tied_to.present()
                     if answer == "Don't remind me again.":
-                        config.settings.showWindowSizeWarning = False
+                        config.settings.showWindowSizeWarning.set(False)
                         self.resizeAlert = False
                     elif answer == "OK":
                         w, h = self.size
