@@ -8,6 +8,9 @@ import blockpicker
 from glbackground import Panel, GLBackground
 from glutils import DisplayList
 
+#&# Prototype for blocks/items names
+import mclangres
+#&#
 
 class BlockView(GLOrtho):
     def __init__(self, materials, blockInfo=None):
@@ -42,8 +45,13 @@ class BlockView(GLOrtho):
                                                      - 1, 1,
                                                      1, 1,
                                                      1, -1, ], dtype='float32'))
-        texOrigin = array(self.materials.blockTextures[blockInfo.ID, blockInfo.blockData, 0])
-        texOrigin *= pixelScale
+        # hack to get end rod to render properly
+        # we really should use json models?
+        if blockInfo.ID == 198:
+            texOrigin = array([17*16, 20*16])
+        else:
+            texOrigin = array(self.materials.blockTextures[blockInfo.ID, blockInfo.blockData, 0])
+        texOrigin = texOrigin.astype(float) * pixelScale
 
         GL.glTexCoordPointer(2, GL.GL_FLOAT, 0, array([texOrigin[0], texOrigin[1] + texSize,
                                                        texOrigin[0], texOrigin[1],
@@ -59,7 +67,10 @@ class BlockView(GLOrtho):
 
     @property
     def tooltipText(self):
-        return "{0}".format(self.blockInfo.name)
+        #&# Prototype for blocks/items names
+        #return str(self.blockInfo.name)
+        return mclangres.translate(self.blockInfo.name)
+        #&#
 
 
 class BlockButton(ButtonBase, Panel):
@@ -67,13 +78,15 @@ class BlockButton(ButtonBase, Panel):
 
     def __init__(self, materials, blockInfo=None, ref=None, recentBlocks=None, *a, **kw):
         self.allowWildcards = False
+        if 'name' not in kw.keys():
+            kw['name'] = 'Panel.BlockButton'
         Panel.__init__(self, *a, **kw)
 
         self.bg_color = (1, 1, 1, 0.25)
         self._ref = ref
         if blockInfo is None and ref is not None:
             blockInfo = ref.get()
-        blockInfo = blockInfo or materials.Air
+        blockInfo = blockInfo or materials["Air"]
 
         if recentBlocks is not None:
             self.recentBlocks = recentBlocks
@@ -122,7 +135,10 @@ class BlockButton(ButtonBase, Panel):
 
     @property
     def labelText(self):
-        labelText = self.blockInfo.name
+        #&# Prototype for blocks/items names
+        #labelText = self.blockInfo.name
+        labelText = mclangres.translate(self.blockInfo.name)
+        #&#
         if len(labelText) > 24:
             labelText = labelText[:23] + "..."
         return labelText
@@ -163,9 +179,16 @@ class BlockButton(ButtonBase, Panel):
 
     @property
     def tooltipText(self):
-        return "{0}".format(self.blockInfo.name)
+        #&# Prototype for blocks/items names
+        #return str(self.blockInfo.name)
+        return mclangres.translate(self.blockInfo.name)
+        #&#
 
     def action(self):
         blockPicker = blockpicker.BlockPicker(self.blockInfo, self.materials, allowWildcards=self.allowWildcards)
         if blockPicker.present():
             self.blockInfo = blockPicker.blockInfo
+
+    def draw_all(self, s):
+        #-# Looks like a bad stuf... Be aware of the 'spacing' member of the widgets parent.
+        Panel.gl_draw_all(self, self.get_root(), (self.local_to_global_offset()[0], self.local_to_global_offset()[1] - self.height + self.parent.spacing))

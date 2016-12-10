@@ -174,11 +174,14 @@ from indev import MCIndevLevel
 from infiniteworld import MCInfdevOldLevel
 from javalevel import MCJavaLevel
 from logging import getLogger
-from directories import saveFileDir
+import logging
+from directories import minecraftSaveFileDir
 import nbt
 from numpy import fromstring
 import os
 from pocket import PocketWorld
+from leveldbpocket import PocketLeveldbWorld
+from pymclevel import leveldbpocket
 from schematic import INVEditChest, MCSchematic, ZipSchematic
 import sys
 import traceback
@@ -218,8 +221,14 @@ def fromFile(filename, loadInfinite=True, readonly=False):
             raise ValueError("Asked to load {0} which is an infinite level, loadInfinite was False".format(
                 os.path.basename(filename)))
 
+    if PocketLeveldbWorld._isLevel(filename):
+        if leveldbpocket.leveldb_available:
+            return PocketLeveldbWorld(filename)
+        else:
+            logging.exception("Pocket support has failed")
+
     if os.path.isdir(filename):
-        raise ValueError("Folder {0} was not identified as a Minecraft level.".format(os.path.basename(filename)))
+        logging.exception("World load failed, trying to open a directory instead of a file")
 
     f = file(filename, 'rb')
     rawdata = f.read()
@@ -276,7 +285,7 @@ def fromFile(filename, loadInfinite=True, readonly=False):
             return MCIndevLevel(root_tag, filename)
         if MCSchematic._isTagLevel(root_tag):
             log.info(u"Detected Schematic.")
-            return MCSchematic(root_tag=root_tag, filename=filename)
+            return MCSchematic(filename=filename)
 
         if INVEditChest._isTagLevel(root_tag):
             log.info(u"Detected INVEdit inventory file")
@@ -286,11 +295,11 @@ def fromFile(filename, loadInfinite=True, readonly=False):
 
 
 def loadWorld(name):
-    filename = os.path.join(saveFileDir, name)
+    filename = os.path.join(minecraftSaveFileDir, name)
     return fromFile(filename)
 
 
 def loadWorldNumber(i):
     # deprecated
-    filename = u"{0}{1}{2}{3}{1}".format(saveFileDir, os.sep, u"World", i)
+    filename = u"{0}{1}{2}{3}{1}".format(minecraftSaveFileDir, os.sep, u"World", i)
     return fromFile(filename)

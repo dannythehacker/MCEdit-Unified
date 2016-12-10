@@ -33,7 +33,8 @@ class Vector(_Vector):
 
     def normalize(self):
         l = self.length()
-        if l == 0: return self
+        if l == 0:
+            return self
         return self / l
 
     def intfloor(self):
@@ -190,7 +191,6 @@ class BoundingBox(object):
 
     def __cmp__(self, b):
         return cmp((self.origin, self.size), (b.origin, b.size))
-
 
     # --- Chunk positions ---
 

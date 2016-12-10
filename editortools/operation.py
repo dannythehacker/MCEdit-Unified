@@ -4,14 +4,12 @@ import os
 import shutil
 import tempfile
 import albow
-#-#
 from albow.translate import _
-#-#
 from pymclevel import BoundingBox
 import numpy
 from albow.root import Cancel
 import pymclevel
-from mceutils import showProgress
+from albow import showProgress
 from pymclevel.mclevelbase import exhaust
 
 undo_folder = os.path.join(tempfile.gettempdir(), "mcedit_undo", str(os.getpid()))
@@ -30,6 +28,7 @@ atexit.register(shutil.rmtree, undo_folder, True)
 class Operation(object):
     changedLevel = True
     undoLevel = None
+    redoLevel = None
 
     def __init__(self, editor, level):
         self.editor = editor
@@ -75,7 +74,8 @@ class Operation(object):
 
         return undoLevel
 
-    def extractUndoSchematic(self, level, box):
+    @staticmethod
+    def extractUndoSchematic(level, box):
         if box.volume > 131072:
             sch = showProgress("Recording undo...", level.extractZipSchematicIter(box), cancel=True)
         else:
@@ -87,7 +87,6 @@ class Operation(object):
 
         return sch
 
-
     # represents a single undoable operation
     def perform(self, recordUndo=True):
         " Perform the operation. Record undo information if recordUndo"
@@ -98,6 +97,7 @@ class Operation(object):
             should override this."""
 
         if self.undoLevel:
+            self.redoLevel = self.extractUndo(self.level, self.dirtyBox())
 
             def _undo():
                 yield 0, 0, "Undoing..."
@@ -117,6 +117,23 @@ class Operation(object):
 
             self.editor.invalidateChunks(self.undoLevel.allChunks)
 
+    def redo(self):
+        if self.redoLevel:
+            def _redo():
+                yield 0, 0, "Redoing..."
+                if hasattr(self.level, 'copyChunkFrom'):
+                    for i, (cx, cz) in enumerate(self.redoLevel.allChunks):
+                        self.level.copyChunkFrom(self.redoLevel, cx, cz)
+                        yield i, self.redoLevel.chunkCount, "Copying chunk %s..." % ((cx, cz),)
+                else:
+                    for i in self.level.copyBlocksFromIter(self.redoLevel, self.redoLevel.bounds,
+                                                           self.redoLevel.sourcePoint, biomes=True):
+                        yield i, self.undoLevel.chunkCount, "Copying..."
+
+            if self.redoLevel.chunkCount > 25:
+                showProgress("Redoing...", _redo())
+            else:
+                exhaust(_redo())
 
     def dirtyBox(self):
         """ The region modified by the operation.

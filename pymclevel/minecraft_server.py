@@ -4,6 +4,7 @@ import logging
 import os
 from os.path import dirname, join, basename
 import random
+from pymclevel import PocketLeveldbWorld
 import re
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ import json
 import urllib2
 
 import infiniteworld
-from directories import getPYMCAppDataDirectory
+from directories import getCacheDir
 from mclevelbase import exhaust, ChunkNotPresent
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,8 @@ __author__ = 'Rio'
 
 # Thank you, Stackoverflow
 # http://stackoverflow.com/questions/377017/test-if-executable-exists-in-python
+
+
 def which(program):
     def is_exe(f):
         return os.path.exists(f) and os.access(f, os.X_OK)
@@ -53,12 +56,10 @@ alphanum_key = lambda key: [convert(c) for c in re.split('([0-9]+)', key)]
 
 
 def getVersions(doSnapshot):
-    version = None
     JAR_VERSION_URL_TEMPLATE = "https://s3.amazonaws.com/Minecraft.Download/versions/{}/minecraft_server.{}.jar"
     versionSite = urllib2.urlopen("http://s3.amazonaws.com/Minecraft.Download/versions/versions.json")
     versionSiteResponse = versionSite.read()
     versionJSON = json.loads(versionSiteResponse)
-    version = None
     if doSnapshot:
         version = versionJSON["latest"]["snapshot"]
     else:
@@ -75,14 +76,9 @@ def sort_nicely(l):
 
 
 class ServerJarStorage(object):
-    defaultCacheDir = os.path.join(getPYMCAppDataDirectory(), u"ServerJarStorage")
+    cacheDir = os.path.join(getCacheDir(), u"ServerJarStorage")
 
     def __init__(self, cacheDir=None):
-        if cacheDir is None:
-            cacheDir = self.defaultCacheDir
-
-        self.cacheDir = cacheDir
-
         if not os.path.exists(self.cacheDir):
             os.makedirs(self.cacheDir)
         readme = os.path.join(self.cacheDir, "README.TXT")
@@ -97,7 +93,7 @@ subfolders, one for each version of the server. Each subfolder must hold at
 least one file named minecraft_server.jar, and the subfolder's name should
 have the server's version plus the names of any installed mods.
 
-There may already be a subfolder here (for example, "Beta 1.7.3") if you have
+There may already be a subfolder here (for example, "Release 1.7.10") if you have
 used the Chunk Create feature in MCEdit to create chunks using the server.
 
 Version numbers can be automatically detected. If you place one or more
@@ -279,6 +275,7 @@ class MCServerChunkGenerator(object):
     javaExe = findJava()
     jarStorage = None
     tempWorldCache = {}
+    processes = []
 
     def __init__(self, version=None, jarfile=None, jarStorage=None):
 
@@ -295,6 +292,7 @@ class MCServerChunkGenerator(object):
                     version or "(latest)", self.jarStorage.cacheDir))
         self.serverJarFile = jarfile
         self.serverVersion = version or self._serverVersion()
+        atexit.register(MCServerChunkGenerator.terminateProcesses)
 
     @classmethod
     def getDefaultJarStorage(cls):
@@ -366,15 +364,13 @@ class MCServerChunkGenerator(object):
     def generateAtPosition(self, tempWorld, tempDir, cx, cz):
         return exhaust(self.generateAtPositionIter(tempWorld, tempDir, cx, cz))
 
-    def addEULA(self, tempDir):
-        eulaLines = []
-        eulaLines.append(
-            "#By changing the setting below to TRUE you are indicating your agreement to our EULA (https://account.mojang.com/documents/minecraft_eula).\n")
-        eulaLines.append("#Wed Jul 23 21:10:11 EDT 2014\n")
-        eulaLines.append("eula=true\n")
+    @staticmethod
+    def addEULA(tempDir):
+        eulaLines = [
+            "#By changing the setting below to TRUE you are indicating your agreement to our EULA (https://account.mojang.com/documents/minecraft_eula).\n",
+            "#Wed Jul 23 21:10:11 EDT 2014\n", "eula=true\n"]
         with open(tempDir + "/" + "eula.txt", "w") as f:
             f.writelines(eulaLines)
-
 
     def generateAtPositionIter(self, tempWorld, tempDir, cx, cz, simulate=False):
         tempWorldRW = infiniteworld.MCInfdevOldLevel(tempWorld.filename)
@@ -430,17 +426,20 @@ class MCServerChunkGenerator(object):
         (tempWorld.parentWorld or tempWorld).loadLevelDat()  # reload version number
 
     def copyChunkAtPosition(self, tempWorld, level, cx, cz):
+
         if level.containsChunk(cx, cz):
             return
         try:
             tempChunkBytes = tempWorld._getChunkBytes(cx, cz)
         except ChunkNotPresent, e:
-            raise ChunkNotPresent, "While generating a world in {0} using server {1} ({2!r})".format(tempWorld,
+            raise ChunkNotPresent("While generating a world in {0} using server {1} ({2!r})".format(tempWorld,
                                                                                                      self.serverJarFile,
                                                                                                      e), sys.exc_info()[
-                2]
-
-        level.worldFolder.saveChunk(cx, cz, tempChunkBytes)
+                2])
+        if isinstance(level, PocketLeveldbWorld):
+            level.saveGeneratedChunk(cx, cz, tempChunkBytes)
+        else:
+            level.worldFolder.saveChunk(cx, cz, tempChunkBytes)
         level._allChunks = None
 
     def generateChunkInLevel(self, level, cx, cz):
@@ -450,13 +449,13 @@ class MCServerChunkGenerator(object):
         self.generateAtPosition(tempWorld, tempDir, cx, cz)
         self.copyChunkAtPosition(tempWorld, level, cx, cz)
 
-    minRadius = 5
+    minRadius = 12
     maxRadius = 20
 
     def createLevel(self, level, box, simulate=False, **kw):
         return exhaust(self.createLevelIter(level, box, simulate, **kw))
 
-    def createLevelIter(self, level, box, simulate=False, **kw):
+    def createLevelIter(self, level, box, simulate=False, worldType="DEFAULT", **kw):
         if isinstance(level, basestring):
             filename = level
             level = infiniteworld.MCInfdevOldLevel(filename, create=True, **kw)
@@ -475,6 +474,7 @@ class MCServerChunkGenerator(object):
             props = readProperties(join(dirname(self.serverJarFile), "server.properties"))
             props["level-name"] = basename(level.worldFolder.filename)
             props["server-port"] = int(32767 + random.random() * 32700)
+            props["level-type"] = worldType
             saveProperties(propsFile, props)
 
             for p in self.generateAtPositionIter(level, parentDir, cx, cz, simulate):
@@ -556,9 +556,17 @@ class MCServerChunkGenerator(object):
                                 stderr=subprocess.STDOUT,
                                 universal_newlines=True,
         )
-
-        atexit.register(proc.terminate)
+        cls.processes.append(proc)
         return proc
+    
+    @classmethod
+    def terminateProcesses(cls):
+        for process in cls.processes:
+            if process.poll():
+                try:
+                    process.terminate()
+                except:
+                    pass
 
     def _serverVersion(self):
         return self._serverVersionFromJarFile(self.serverJarFile)

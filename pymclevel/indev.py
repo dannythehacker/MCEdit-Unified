@@ -24,10 +24,10 @@ TAG_Compound "MinecraftLevel"
    {
       TAG_Compound
       {
-         // One of these per entity on the map.
-         // These can change a lot, and are undocumented.
-         // Feel free to play around with them, though.
-         // The most interesting one might be the one with ID "LocalPlayer", which contains the player inventory
+        // One of these per entity on the map.
+        // These can change a lot, and are undocumented.
+        // Feel free to play around with them, though.
+        // The most interesting one might be the one with ID "LocalPlayer", which contains the player inventory
       }
    }
 
@@ -44,9 +44,9 @@ TAG_Compound "MinecraftLevel"
 
       TAG_List "Spawn"                   // Default spawn position
       {
-         TAG_Short x  // These values are multiplied by 32 before being saved
-         TAG_Short y  // That means that the actual values are x/32.0, y/32.0, z/32.0
-         TAG_Short z
+          TAG_Short x  // These values are multiplied by 32 before being saved
+          TAG_Short y  // That means that the actual values are x/32.0, y/32.0, z/32.0
+          TAG_Short z
       }
    }
 
@@ -246,12 +246,14 @@ class MCIndevLevel(EntityLevel):
         log.info(u"Rotating torches: {0}".format(len(torchIndexes.nonzero()[0])))
         self.Data[torchIndexes] = torchRotation[self.Data[torchIndexes]]
 
-    def decodePos(self, v):
+    @staticmethod
+    def decodePos(v):
         b = 10
         m = (1 << b) - 1
         return v & m, (v >> b) & m, (v >> (2 * b))
 
-    def encodePos(self, x, y, z):
+    @staticmethod
+    def encodePos(x, y, z):
         b = 10
         return x + (y << b) + (z << (2 * b))
 
@@ -284,6 +286,7 @@ class MCIndevLevel(EntityLevel):
 
         self.Entities.append(self.LocalPlayer)
         # fix up Entities imported from Alpha worlds
+
         def numbersToFloats(ent):
             for attr in "Motion", "Pos":
                 if attr in ent:

@@ -3,16 +3,12 @@
 #
 #-# Modified by D.C.-G. for translation purpose
 
-from pygame import Rect, draw
+from pygame import Rect, draw, transform
+
 from widget import Widget, overridable_property
 from theme import ThemeProperty
-from utils import blit_in_rect, frame_rect
 import resource
-#-#
-from translate import _
-#-#
-
-#---------------------------------------------------------------------------
+from translate import _, getLang
 
 
 class Control(object):
@@ -54,9 +50,6 @@ class Control(object):
         self._enabled = x
 
 
-#---------------------------------------------------------------------------
-
-
 class AttrRef(object):
     def __init__(self, obj, attr):
         self.obj = obj
@@ -69,9 +62,6 @@ class AttrRef(object):
         setattr(self.obj, self.attr, x)
 
 
-#---------------------------------------------------------------------------
-
-
 class ItemRef(object):
     def __init__(self, obj, item):
         self.obj = obj
@@ -82,9 +72,6 @@ class ItemRef(object):
 
     def set(self, x):
         self.obj[self.item] = x
-
-
-#---------------------------------------------------------------------------
 
 
 class Label(Widget):
@@ -103,32 +90,59 @@ class Label(Widget):
     highlighted = False
     _align = 'l'
 
-    def __init__(self, text, width=None, **kwds):
+    def __init__(self, text, width=None, base_text=None, **kwds):
+        #-# Translation live update preparation
+        # base_text: to be used each time a widget takes a formated string
+        #            defaults to 'text'.
         Widget.__init__(self, **kwds)
-        font = self.font
-        text = _(text, doNotTranslate=kwds.get('doNotTranslate', False))
-        lines = text.split("\n")
+        #-# Translation live update preparation
+        self.fixed_width = width
+        self.base_text = base_text or text
+        self.previous_translation = _(text, doNotTranslate=kwds.get('doNotTranslate', False))
+        #-#
+        self._text = _(text, doNotTranslate=kwds.get('doNotTranslate', False))
+        #-#
+        self.calc_size()
+        #-#
+
+    #-# Translation live update preparation
+    def calc_size(self):
+        lines = self._text.split("\n")
         tw, th = 0, 0
-        for line in lines:
-            w, h = font.size(line)
+        for i in range(len(lines)):
+            line = lines[i]
+            if i == len(lines) - 1:
+                w, h = self.font.size(line)
+            else:
+                w, h = self.font.size(line)[0], self.font.get_linesize()
             tw = max(tw, w)
             th += h
-        if width is not None:
-            tw = width
+        if self.fixed_width is not None:
+            tw = self.fixed_width
         else:
             tw = max(1, tw)
         d = 2 * self.margin
         self.size = (tw + d, th + d)
-        self._text = text
+
+    def get_update_translation(self):
+        return Widget.update_translation(self)
+
+    def set_update_ui(self, v):
+        self.text = self.base_text
+        self.set_text(self.base_text)
+        self.calc_size()
+        Widget.set_update_ui(self, v)
+    #-#
 
     def __repr__(self):
-        return "Label {0}, child of {1}".format(self.text, self.parent)
+        return "Label {0}, child of {1}".format(self.text.encode('ascii', errors='backslashreplace'), self.parent)
 
     def get_text(self):
         return self._text
 
-    def set_text(self, x):
-        self._text = _(x)
+    def set_text(self, x, doNotTranslate=False):
+        self._text = _(x, doNotTranslate=doNotTranslate or self.doNotTranslate)
+        self.calc_size()
 
     def get_align(self):
         return self._align
@@ -199,46 +213,47 @@ class SmallLabel(Label):
     """Small text size. See theme.py"""
 
 
-#---------------------------------------------------------------------------
-
-
 class ButtonBase(Control):
     align = 'c'
     action = None
+    rightClickAction = None
     default_choice_color = ThemeProperty('default_choice_color')
     default_choice_bg_color = ThemeProperty('default_choice_bg_color')
 
     def mouse_down(self, event):
-        if self.enabled:
+        button = event.button
+        if self.enabled and button == 1:
             self._highlighted = True
 
     def mouse_drag(self, event):
         state = event in self
-        if state != self._highlighted:
+        if event.buttons[0] == 1 and state != self._highlighted:
             self._highlighted = state
             self.invalidate()
 
     def mouse_up(self, event):
-        if event in self:
+        button = event.button
+        if event in self and button == 1:
             if self is event.clicked_widget or (event.clicked_widget and self in event.clicked_widget.all_parents()):
                 self._highlighted = False
                 if self.enabled:
                     self.call_handler('action')
+        if event in self and button == 3 and self.enabled:
+            if self is event.clicked_widget or (event.clicked_widget and self in event.clicked_widget.all_parents()):
+                self.call_handler('rightClickAction')
+        self.get_root().fix_sticky_ctrl()
 
-
-#---------------------------------------------------------------------------
 
 
 class Button(ButtonBase, Label):
-    def __init__(self, text, action=None, enable=None, **kwds):
+    def __init__(self, text, action=None, enable=None, rightClickAction=None, **kwds):
         if action:
             kwds['action'] = action
         if enable:
             kwds['enable'] = enable
+        if rightClickAction:
+            kwds['rightClickAction'] = rightClickAction
         Label.__init__(self, text, **kwds)
-
-
-#---------------------------------------------------------------------------
 
 
 class Image(Widget):
@@ -250,11 +265,11 @@ class Image(Widget):
 
     highlighted = False
 
-    def __init__(self, image=None, rect=None, **kwds):
+    def __init__(self, image=None, rect=None, prefix="", **kwds):
         Widget.__init__(self, rect, **kwds)
         if image:
             if isinstance(image, basestring):
-                image = resource.get_image(image)
+                image = resource.get_image(image, prefix=prefix)
             w, h = image.get_size()
             d = 2 * self.margin
             self.size = w + d, h + d
@@ -274,20 +289,37 @@ class Image(Widget):
         r = image.get_rect()
         r.center = frame.center
         surf.blit(image, r)
+        
+class RotatableImage(Image):
+    
+    def __init__(self, angle=0.0, min_angle=0, max_angle=360, **kwds):
+        super(RotatableImage, self).__init__(**kwds)
+        self._angle = -angle
+        self._min_angle = min_angle
+        self._max_angle = max_angle
+    
+    def draw(self, surf):
+        frame = surf.get_rect()
+        if self.highlighted:
+            surf.fill(self.highlight_color)
+        image = self.image
+        image = transform.rotate(image, self._angle)
+        r = image.get_rect()
+        r.center = frame.center
+        surf.blit(image, r)
+        
+    def get_angle(self):
+        return self._angle
 
-
-#    def draw(self, surf):
-#        frame = self.get_margin_rect()
-#        surf.blit(self.image, frame)
-
-#---------------------------------------------------------------------------
-
+    def set_angle(self, angle):
+        angle = max(min(angle, self._max_angle), self._min_angle)
+        self._angle = angle
+        
+    def add_angle(self, angle):
+        self.set_angle(self.get_angle() + (angle * -1))
 
 class ImageButton(ButtonBase, Image):
     pass
-
-
-#---------------------------------------------------------------------------
 
 
 class ValueDisplay(Control, Label):
@@ -298,15 +330,8 @@ class ValueDisplay(Control, Label):
         Label.__init__(self, "", **kwds)
         self.set_size_for_text(width)
 
-    #    def draw(self, surf):
-    #        value = self.value
-    #        text = self.format_value(value)
-    #        buf = self.font.render(text, True, self.fg_color)
-    #        frame = surf.get_rect()
-    #        blit_in_rect(surf, buf, frame, self.align, self.margin)
-
     def get_text(self):
-        return self.format_value(self.value)
+        return self.format_value(_(self.value, self.doNotTranslate))
 
     def format_value(self, value):
         if value is not None:
@@ -323,21 +348,16 @@ class ValueButton(ButtonBase, ValueDisplay):
     align = 'c'
 
     def get_text(self):
-        return self.format_value(self.value)
-
-
-#---------------------------------------------------------------------------
+        return self.format_value(_(self.value, self.doNotTranslate))
 
 
 class CheckControl(Control):
     def mouse_down(self, e):
-        self.value = not self.value
+        if self.get_enabled():
+            self.value = not self.value
 
     def get_highlighted(self):
         return self.value
-
-
-#---------------------------------------------------------------------------
 
 
 class CheckWidget(Widget):
@@ -365,14 +385,8 @@ class CheckWidget(Widget):
                 draw.lines(surf, fg, False, [p1, p2, p3])
 
 
-#---------------------------------------------------------------------------
-
-
 class CheckBox(CheckControl, CheckWidget):
     pass
-
-
-#---------------------------------------------------------------------------
 
 
 class RadioControl(Control):
@@ -383,9 +397,6 @@ class RadioControl(Control):
 
     def mouse_down(self, e):
         self.value = self.setting
-
-
-#---------------------------------------------------------------------------
 
 
 class RadioButton(RadioControl, CheckWidget):

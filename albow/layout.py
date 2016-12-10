@@ -11,15 +11,57 @@ class RowOrColumn(Widget):
 
     def __init__(self, size, items, kwds):
         align = kwds.pop('align', 'c')
-        spacing = kwds.pop('spacing', 10)
+        self.spacing = spacing = kwds.pop('spacing', 10)
         expand = kwds.pop('expand', None)
         if isinstance(expand, int):
             expand = items[expand]
+
+        #-# Translation live update preparation
+        self.expand = expand
+        self.align = align
+        self._size = size
+        #-#
+
         #if kwds:
         #    raise TypeError("Unexpected keyword arguments to Row or Column: %s"
         #        % kwds.keys())
         Widget.__init__(self, **kwds)
-        #print "albow.controls: RowOrColumn: size =", size, "expand =", expand ###
+    #-# Translation live update preparation
+        self.calc_size(items)
+
+    def calc_size(self, _items=None):
+        if _items:
+            items = _items
+        else:
+            items = self.subwidgets
+        expand = self.expand
+        align = self.align
+        size = self._size
+        spacing = self.spacing
+    #-#
+
+        # If the 'expand' value is in 'h' or 'v', resize the widgets according
+        # to the larger one.
+        if type(expand) in (str, unicode):
+            w = 'n'
+            h = 'n'
+            if 'h' in expand:
+                # Expand horizontally
+                w = max([a.width for a in items])
+            if 'v' in expand:
+                # Expand vertically
+                h = max([a.height for a in items])
+            if w != 'n' and h == 'n':
+                for item in items:
+                    item.width = w
+            elif w == 'n' and h != 'n':
+                for item in items:
+                    item.height = h
+            elif w != 'n' and h != 'n':
+                for item in items:
+                    item.width = w
+                    item.height = h
+
         d = self.d
         longways = self.longways
         crossways = self.crossways
@@ -27,10 +69,11 @@ class RowOrColumn(Widget):
         k, attr2, attr3 = self.align_map[align]
         w = 0
         length = 0
-        if isinstance(expand, int):
-            expand = items[expand]
-        elif not expand:
-            expand = items[-1]
+        if items:
+            if isinstance(expand, int):
+                expand = items[expand]
+            elif not expand:
+                expand = items[-1]
         move = ''
         for item in items:
             r = item.rect
@@ -45,7 +88,6 @@ class RowOrColumn(Widget):
             n = len(items)
             if n > 1:
                 length += spacing * (n - 1)
-            #print "albow.controls: expanding size from", length, "to", size ###
             setattr(expand.rect, longways, max(1, size - length))
         h = w * k // 2
         m = self.margin
@@ -55,12 +97,19 @@ class RowOrColumn(Widget):
         sy = spacing * d[1]
         for item in items:
             setattr(item.rect, attr2, (px, py))
-            self.add(item)
+            #-# Translation live update preparation
+            if _items:
+                self.add(item)
+            #-#
             p = getattr(item.rect, attr3)
             px = p[0] + sx
             py = p[1] + sy
         self.shrink_wrap()
 
+    def call_handler(self, name, *args):
+        # Automatically call the parent *_action methods
+        if Widget.call_handler(self, name, *args) == 'pass':
+            return self.call_parent_handler(name, *args)
 
 #---------------------------------------------------------------------------
 
@@ -161,3 +210,8 @@ class Frame(Widget):
         self.size = (w + 2 * d, h + 2 * d)
         client.topleft = (d, d)
         self.add(client)
+
+    def call_handler(self, name, *args):
+        # Automatically call the parent *_action methods
+        if Widget.call_handler(self, name, *args) == 'pass':
+            return self.call_parent_handler(name, *args)

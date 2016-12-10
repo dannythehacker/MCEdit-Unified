@@ -9,9 +9,7 @@ from root import get_root, get_focus
 from dialogs import Dialog
 from theme import ThemeProperty
 from pygame import Rect, draw
-#-#
 from translate import _
-#-#
 #---------------------------------------------------------------------------
 
 
@@ -29,13 +27,13 @@ class MenuItem(object):
         cmd_name = "Ctrl "
         option_name = "Alt "
 
-    def __init__(self, text="", command=None):
+    def __init__(self, text="", command=None, doNotTranslate=False):
         self.command = command
         if "/" in text:
             text, key = text.split("/", 1)
         else:
             key = ""
-        self.text = _(text)
+        self.text = _(text, doNotTranslate=doNotTranslate)
         if key:
             keyname = key[-1]
             mods = key[:-1]
@@ -60,25 +58,48 @@ class Menu(Dialog):
     scroll = 0
 
     def __init__(self, title, items, scrolling=False, scroll_items=30,
-                 scroll_page=5, **kwds):
-        self.title = _(title)
+                 scroll_page=5, handler=None, **kwds):
+        self.handler = handler
+        self.title = _(title, doNotTranslate=kwds.get('doNotTranslate', False))
         self.items = items
-        self._items = [MenuItem(*item) for item in items]
+        self._items = [MenuItem(*item, doNotTranslate=kwds.get('doNotTranslate', False)) for item in items]
         self.scrolling = scrolling and len(self._items) > scroll_items
         self.scroll_items = scroll_items
         self.scroll_page = scroll_page
         Dialog.__init__(self, **kwds)
 
+        self.root = self.get_root()
+        self.calc_size()
+
+    #&#
+    def set_items(self, items):
+        self.items = items
+        self._items = [MenuItem(*item, doNotTranslate=self.doNotTranslate) for item in items]
+
+    def set_scroll_items(self, scroll_items):
+        if scroll_items < len(self.items):
+            self.scroll_items = scroll_items
+        else:
+            self.scroll_items = len(self.items)
+        self.calc_size()
+    #&#
+
+    def calc_size(self):
         h = self.font.get_linesize()
         if self.scrolling:
             self.height = h * self.scroll_items + h
         else:
             self.height = h * len(self._items) + h
 
+    def set_update_ui(self, v):
+        if v:
+            self._items = [MenuItem(*item, doNotTranslate=self.doNotTranslate) for item in self.items]
+        Dialog.set_update_ui(self, v)
+
     def present(self, client, pos):
-        client = client or get_root()
+        client = client or self.root
         self.topleft = client.local_to_global(pos)
-        focus = get_focus()
+        focus = self.handler or get_focus()
         font = self.font
         h = font.get_linesize()
         items = self._items
@@ -101,12 +122,12 @@ class Menu(Dialog):
         self.size = (width, height)
         self._hilited = None
 
-        root = get_root()
-        self.rect.clamp_ip(root.rect)
+        self.rect.clamp_ip(self.root.rect)
 
         return Dialog.present(self, centered=False)
 
-    def command_is_enabled(self, item, focus):
+    @staticmethod
+    def command_is_enabled(item, focus):
         cmd = item.command
         if cmd:
             enabler_name = cmd + '_enabled'

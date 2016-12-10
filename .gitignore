@@ -5,6 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
+*.c
 
 # Distribution / packaging
 .Python
@@ -19,6 +20,12 @@ lib64/
 parts/
 sdist/
 var/
+ENV/
+leveldb_mcpe
+scripts-pyinstaller
+pymclevel/_nbt.html
+pyinstaller-develop
+
 *.egg-info/
 .installed.cfg
 *.egg
@@ -54,9 +61,10 @@ docs/_build/
 # PyBuilder
 target/
 filters/modifyitemstrings.py
+build.bat
 
 # Eclipse
-
+.externalToolBuilders
 .metadata
 *.xcodeproj
 .project
@@ -65,3 +73,18 @@ filters/modifyitemstrings.py
 .idea/
 *.iml
 Thumbs.db
+
+# MCEdit stuff
+filters.json
+pymclevel/.git/
+*.lnk
+Filters/
+Schematics/
+terrain-textures/
+player-skins/
+
+# Profiler Data
+*.svg
+*.profile
+splash
+leveldb-mcpe/leveldb-mcpe.lib

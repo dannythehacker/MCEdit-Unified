@@ -1,8 +1,8 @@
 from __future__ import division
 import sys
-from pygame import Rect, Surface, draw, image
-from pygame.locals import K_RETURN, K_KP_ENTER, K_ESCAPE, K_TAB, \
-    KEYDOWN, SRCALPHA
+import albow # used for translation update
+from pygame import Rect, Surface, image
+from pygame.locals import K_RETURN, K_KP_ENTER, K_ESCAPE, K_TAB, KEYDOWN, SRCALPHA
 from pygame.mouse import set_cursor
 from pygame.cursors import arrow as arrow_cursor
 from pygame.transform import rotozoom
@@ -10,7 +10,7 @@ from vectors import add, subtract
 from utils import frame_rect
 import theme
 from theme import ThemeProperty, FontProperty
-
+import resource
 from numpy import fromstring
 
 debug_rect = False
@@ -90,15 +90,55 @@ class Widget(object):
     tooltip = None
     tooltipText = None
     doNotTranslate = False
+
+    # 'name' is used to track widgets without parent
+    name = 'Widget'
+
     def __init__(self, rect=None, **kwds):
         if rect and not isinstance(rect, Rect):
             raise TypeError("Widget rect not a pygame.Rect")
         self._rect = Rect(rect or (0, 0, 100, 100))
+        #-# Translation live update preparation
+        self.__lang = albow.translate.getLang()
+        self.__update_translation = False
+        self.shrink_wrapped = False
+        #-#
         self.parent = None
         self.subwidgets = []
         self.focus_switch = None
         self.is_modal = False
         self.set(**kwds)
+        self.root = self.get_root()
+        self.setup_spacings()
+
+    #-# Translation live update preparation
+    @property
+    def get_update_translation(self):
+        return self.__update_translation
+
+    def set_update_ui(self, v):
+        if v:
+            self.font = self.predict_font({})
+            for widget in self.subwidgets:
+                widget.set_update_ui(v)
+            if self.shrink_wrapped:
+                self.shrink_wrap()
+            if hasattr(self, 'calc_size'):
+                self.calc_size()
+            self.invalidate()
+        self.__update_translation = v
+
+    #-#
+
+    def setup_spacings(self):
+        def new_size(size):
+            size = float(size * 1000)
+            size = size / float(100)
+            size = int(size * resource.font_proportion / 1000)
+            return size
+        self.margin = new_size(self.margin)
+        if hasattr(self, 'spacing'):
+            self.spacing = new_size(self.spacing)
 
     def set(self, **kwds):
         for name, value in kwds.iteritems():
@@ -163,7 +203,7 @@ class Widget(object):
             widget.parent_resized(dw, dh)
 
     def parent_resized(self, dw, dh):
-        debug_resize = self.debug_resize or self.parent.debug_resize
+        debug_resize = self.debug_resize or getattr(self.parent, 'debug_resize', False)
         if debug_resize:
             print "Widget.parent_resized:", self, "by", (dw, dh)
         left, top, width, height = self._rect
@@ -205,7 +245,8 @@ class Widget(object):
         if resize:
             if debug_resize:
                 print "Widget.parent_resized: changing rect to", (left, top, width, height)
-            self.rect = (left, top, width, height)
+            r = Rect((left, top, width, height))
+            self.rect = Rect((left, top, width, height))
         elif move:
             if debug_resize:
                 print "Widget.parent_resized: moving to", (left, top)
@@ -240,10 +281,13 @@ class Widget(object):
 
     visible = overridable_property('visible')
 
-    def add(self, arg):
+    def add(self, arg, index=None):
         if arg:
             if isinstance(arg, Widget):
-                arg.set_parent(self)
+                if index is not None:
+                    arg.set_parent(self, index)
+                else:
+                    arg.set_parent(self)
             else:
                 for item in arg:
                     self.add(item)
@@ -257,13 +301,13 @@ class Widget(object):
         if widget in self.subwidgets:
             widget.set_parent(None)
 
-    def set_parent(self, parent):
+    def set_parent(self, parent, index=None):
         if parent is not self.parent:
             if self.parent:
                 self.parent._remove(self)
             self.parent = parent
             if parent:
-                parent._add(self)
+                parent._add(self, index)
 
     def all_parents(self):
         widget = self
@@ -273,16 +317,19 @@ class Widget(object):
             widget = widget.parent
         return parents
 
-    def _add(self, widget):
-        self.subwidgets.append(widget)
+    def _add(self, widget, index=None):
+        if index is not None:
+            self.subwidgets.insert(index, widget)
+        else:
+            self.subwidgets.append(widget)
         if hasattr(widget, "idleevent"):
             #print "Adding idle handler for ", widget
-            self.get_root().add_idle_handler(widget)
+            self.root.add_idle_handler(widget)
 
     def _remove(self, widget):
         if hasattr(widget, "idleevent"):
             #print "Removing idle handler for ", widget
-            self.get_root().remove_idle_handler(widget)
+            self.root.remove_idle_handler(widget)
         self.subwidgets.remove(widget)
 
         if self.focus_switch is widget:
@@ -375,7 +422,7 @@ class Widget(object):
     def dispatch_key(self, name, event):
         if self.visible:
 
-            if event.cmd and event.type == KEYDOWN:
+            if event.type == KEYDOWN:
                 menubar = self._menubar
                 if menubar and menubar.handle_command_key(event):
                     return
@@ -406,6 +453,7 @@ class Widget(object):
                 break
             focus = parent.focus_switch
             if focus and focus is not widget:
+                self.root.notMove = False
                 focus.dispatch_attention_loss()
             widget = parent
 
@@ -464,6 +512,7 @@ class Widget(object):
                 self.dismiss(self.enter_response)
                 return
         elif k == K_ESCAPE:
+            self.root.fix_sticky_ctrl()
             if self.cancel_response is not None:
                 self.dismiss(self.cancel_response)
                 return
@@ -485,27 +534,32 @@ class Widget(object):
 
     @property
     def is_hover(self):
-        return self.get_root().hover_widget is self
+        return self.root.hover_widget is self
 
     def present(self, centered=True):
         #print "Widget: presenting with rect", self.rect
-        root = self.get_root()
+        if self.root is None:
+            self.root = self.get_root()
+        if "ControlPanel" not in str(self):
+            self.root.notMove = True
         if centered:
-            self.center = root.center
-        root.add(self)
+            self.center = self.root.center
+        self.root.add(self)
         try:
-            root.run_modal(self)
+            self.root.run_modal(self)
             self.dispatch_attention_loss()
         finally:
-            root.remove(self)
+            self.root.remove(self)
         #print "Widget.present: returning", self.modal_result
+        if "ControlPanel" not in str(self):
+            self.root.notMove = False
         return self.modal_result
 
     def dismiss(self, value=True):
+        self.root.notMove = False
         self.modal_result = value
 
     def get_root(self):
-        # Deprecated, use root.get_root()
         return root_widget
 
     def get_top_widget(self):
@@ -550,13 +604,16 @@ class Widget(object):
             for r in rects:
                 rmax = rmax.union(r)
             self._rect.size = add(rmax.topleft, rmax.bottomright)
+        #-# Translation live update preparation
+        self.shrink_wrapped = True
+        #-#
 
     def invalidate(self):
-        root = self.get_root()
-        if root:
-            root.do_draw = True
+        if self.root:
+            self.root.bonus_draw_time = False
 
-    def get_cursor(self, event):
+    @staticmethod
+    def get_cursor(event):
         return arrow_cursor
 
     def predict(self, kwds, name):
@@ -698,8 +755,7 @@ class Widget(object):
         return r.collidepoint(p)
 
     def get_mouse(self):
-        root = self.get_root()
-        return root.get_mouse_for(self)
+        return self.root.get_mouse_for(self)
 
     def get_menu_bar(self):
         return self._menubar
@@ -735,7 +791,7 @@ class Widget(object):
         else:
             try:
                 surface = Surface(self.size, SRCALPHA)
-            except Exception, e:
+            except Exception:
                 #size error?
                 return
             self.draw_all(surface)

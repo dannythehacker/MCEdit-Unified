@@ -1,12 +1,13 @@
 """
     compass
 """
-from __future__ import absolute_import, division, print_function, unicode_literals
 import logging
 from OpenGL import GL
 from drawable import Drawable
 from glutils import gl
 from mceutils import loadPNGTexture
+from config import config
+import os
 
 log = logging.getLogger(__name__)
 
@@ -18,10 +19,10 @@ def makeQuad(minx, miny, width, height):
 class CompassOverlay(Drawable):
     _tex = None
     _yawPitch = (0., 0.)
+    x, y = 0, 0
 
-    def __init__(self, small=False):
+    def __init__(self):
         super(CompassOverlay, self).__init__()
-        self.small = small
 
     @property
     def yawPitch(self):
@@ -34,21 +35,20 @@ class CompassOverlay(Drawable):
 
     def drawSelf(self):
         if self._tex is None:
-            if self.small:
-                filename = "compass_small.png"
-            else:
-                filename = "compass.png"
+            filename = os.path.join("toolicons", "compass.png")
 
-            self._tex = loadPNGTexture("toolicons/" + filename)  # , minFilter=GL.GL_LINEAR, magFilter=GL.GL_LINEAR)
-
+            self._tex = loadPNGTexture(filename)
+            
         self._tex.bind()
-        size = 0.075
+        size = 0.001 * config.settings.compassSize.get()
 
         with gl.glPushMatrix(GL.GL_MODELVIEW):
             GL.glLoadIdentity()
 
             yaw, pitch = self.yawPitch
-            GL.glTranslatef(1. - size, size, 0.0)  # position on upper right corner
+            if config.settings.viewMode.get() == "Chunk":
+                yaw = -180
+            GL.glTranslatef(1. - (size + self.x), size + self.y, 0.0)  # position on upper right corner
             GL.glRotatef(180 - yaw, 0., 0., 1.)  # adjust to north
             GL.glColor3f(1., 1., 1.)
 

@@ -3,14 +3,13 @@ Created on Jul 22, 2011
 
 @author: Rio
 '''
+import collections
 
-import copy
 from datetime import datetime
 import itertools
 from logging import getLogger
 from math import floor
 import os
-import re
 import random
 import shutil
 import struct
@@ -20,25 +19,25 @@ import weakref
 import zlib
 import sys
 
-import blockrotation
 from box import BoundingBox
 from entity import Entity, TileEntity, TileTick
 from faces import FaceXDecreasing, FaceXIncreasing, FaceZDecreasing, FaceZIncreasing
 from level import LightedChunk, EntityLevel, computeChunkHeightMap, MCLevel, ChunkBase
 from materials import alphaMaterials
-from mclevelbase import ChunkMalformed, ChunkNotPresent, exhaust, PlayerNotFound
+from mclevelbase import ChunkMalformed, ChunkNotPresent, ChunkAccessDenied,ChunkConcurrentException,exhaust, PlayerNotFound
 import nbt
 from numpy import array, clip, maximum, zeros
 from regionfile import MCRegionFile
-import version_utils
-import scoreboard
+import logging
+from uuid import UUID
+import id_definitions
 
 log = getLogger(__name__)
 
 DIM_NETHER = -1
 DIM_END = 1
 
-__all__ = ["ZeroChunk", "AnvilChunk", "ChunkedLevelMixin", "MCInfdevOldLevel", "MCAlphaDimension", "ZipSchematic"]
+__all__ = ["ZeroChunk", "AnvilChunk", "ChunkedLevelMixin", "MCInfdevOldLevel", "MCAlphaDimension"]
 _zeros = {}
 
 
@@ -240,10 +239,8 @@ class AnvilChunk(LightedChunk):
         self.chunkPosition = chunkData.chunkPosition
         self.chunkData = chunkData
 
-
     def savedTagData(self):
         return self.chunkData.savedTagData()
-
 
     def __str__(self):
         return u"AnvilChunk, coords:{0}, world: {1}, D:{2}, L:{3}".format(self.chunkPosition, self.world.displayName,
@@ -261,10 +258,7 @@ class AnvilChunk(LightedChunk):
             self.world.chunksNeedingLighting.discard(self.chunkPosition)
 
     def generateHeightMap(self):
-        if self.world.dimNo == DIM_NETHER:
-            self.HeightMap[:] = 0
-        else:
-            computeChunkHeightMap(self.materials, self.Blocks, self.HeightMap)
+        computeChunkHeightMap(self.materials, self.Blocks, self.HeightMap)
 
     def addEntity(self, entityTag):
 
@@ -295,7 +289,6 @@ class AnvilChunk(LightedChunk):
     def removeTileTicksInBox(self, box):
         self.dirty = True
         return super(AnvilChunk, self).removeTileTicksInBox(box)
-
 
     # --- AnvilChunkData accessors ---
 
@@ -355,10 +348,10 @@ class AnvilChunk(LightedChunk):
 
     @property
     def TileTicks(self):
-        if self.root_tag["Level"].__contains__("TileTicks"):
+        if "TileTicks" in self.root_tag["Level"]:
             return self.root_tag["Level"]["TileTicks"]
         else:
-            self.root_tag["Level"]["TileTicks"] = nbt.TAG_Compound()
+            self.root_tag["Level"]["TileTicks"] = nbt.TAG_List()
             return self.root_tag["Level"]["TileTicks"]
 
     @property
@@ -542,7 +535,6 @@ class ChunkedLevelMixin(MCLevel):
         return oldValue < lightValue
 
     createChunk = NotImplemented
-
 
     def generateLights(self, dirtyChunkPositions=None):
         return exhaust(self.generateLightsIter(dirtyChunkPositions))
@@ -898,7 +890,7 @@ class AnvilWorldFolder(object):
             os.mkdir(filename)
 
         elif not os.path.isdir(filename):
-            raise IOError, "AnvilWorldFolder: Not a folder: %s" % filename
+            raise IOError("AnvilWorldFolder: Not a folder: %s" % filename)
 
         self.filename = filename
         self.regionFiles = {}
@@ -909,7 +901,9 @@ class AnvilWorldFolder(object):
         path = path.replace("/", os.path.sep)
         return os.path.join(self.filename, path)
 
-    def getFolderPath(self, path):
+    def getFolderPath(self, path, checksExists=True, generation=False):
+        if checksExists and not os.path.exists(self.filename) and "##MCEDIT.TEMP##" in path and not generation:
+            raise IOError("The file does not exist")
         path = self.getFilePath(path)
         if not os.path.exists(path) and "players" not in path:
             os.makedirs(path)
@@ -919,7 +913,7 @@ class AnvilWorldFolder(object):
     # --- Region files ---
 
     def getRegionFilename(self, rx, rz):
-        return os.path.join(self.getFolderPath("region"), "r.%s.%s.%s" % (rx, rz, "mca"))
+        return os.path.join(self.getFolderPath("region", False), "r.%s.%s.%s" % (rx, rz, "mca"))
 
     def getRegionFile(self, rx, rz):
         regionFile = self.regionFiles.get((rx, rz))
@@ -942,7 +936,8 @@ class AnvilWorldFolder(object):
 
     # --- Chunks and chunk listing ---
 
-    def tryLoadRegionFile(self, filepath):
+    @staticmethod
+    def tryLoadRegionFile(filepath):
         filename = os.path.basename(filepath)
         bits = filename.split('.')
         if len(bits) < 4 or bits[0] != 'r' or bits[3] != "mca":
@@ -956,7 +951,7 @@ class AnvilWorldFolder(object):
         return MCRegionFile(filepath, (rx, rz))
 
     def findRegionFiles(self):
-        regionDir = self.getFolderPath("region")
+        regionDir = self.getFolderPath("region", generation=True)
 
         regionFiles = os.listdir(regionDir)
         for filename in regionFiles:
@@ -1025,6 +1020,8 @@ class AnvilWorldFolder(object):
 
 
 class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
+    playersFolder = None
+
     def __init__(self, filename=None, create=False, random_seed=None, last_played=None, readonly=False):
         """
         Load an Alpha level from the given filename. It can point to either
@@ -1044,6 +1041,10 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         self.players = []
         assert not (create and readonly)
 
+        self.lockAcquireFuncs = []
+        self.lockLoseFuncs = []
+        self.initTime = -1
+
         if os.path.basename(filename) in ("level.dat", "level.dat_old"):
             filename = os.path.dirname(filename)
 
@@ -1061,21 +1062,27 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         self.readonly = readonly
         if not readonly:
             self.acquireSessionLock()
-
             workFolderPath = self.worldFolder.getFolderPath("##MCEDIT.TEMP##")
+            workFolderPath2 = self.worldFolder.getFolderPath("##MCEDIT.TEMP2##")
             if os.path.exists(workFolderPath):
                 # xxxxxxx Opening a world a second time deletes the first world's work folder and crashes when the first
                 # world tries to read a modified chunk from the work folder. This mainly happens when importing a world
                 # into itself after modifying it.
                 shutil.rmtree(workFolderPath, True)
+            if os.path.exists(workFolderPath2):
+                shutil.rmtree(workFolderPath2, True)
 
             self.unsavedWorkFolder = AnvilWorldFolder(workFolderPath)
+            self.fileEditsFolder = AnvilWorldFolder(workFolderPath2)
+
+            self.editFileNumber = 1
 
         # maps (cx, cz) pairs to AnvilChunk
         self._loadedChunks = weakref.WeakValueDictionary()
 
         # maps (cx, cz) pairs to AnvilChunkData
         self._loadedChunkData = {}
+        self.recentChunks = collections.deque(maxlen=20)
 
         self.chunksNeedingLighting = set()
         self._allChunks = None
@@ -1085,28 +1092,31 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
 
         assert self.version == self.VERSION_ANVIL, "Pre-Anvil world formats are not supported (for now)"
 
-        if os.path.exists(self.worldFolder.getFolderPath("players")) and os.listdir(
-                self.worldFolder.getFolderPath("players")) != []:
-            self.playersFolder = self.worldFolder.getFolderPath("players")
-            self.oldPlayerFolderFormat = True
-        if os.path.exists(self.worldFolder.getFolderPath("playerdata")):
-            self.playersFolder = self.worldFolder.getFolderPath("playerdata")
-            self.oldPlayerFolderFormat = False
-        self.players = [x[:-4] for x in os.listdir(self.playersFolder) if x.endswith(".dat")]
-        if "Player" in self.root_tag["Data"]:
-            self.players.append("Player")
+        if not readonly:
+            if os.path.exists(self.worldFolder.getFolderPath("players")) and os.listdir(
+                    self.worldFolder.getFolderPath("players")) != []:
+                self.playersFolder = self.worldFolder.getFolderPath("players")
+                self.oldPlayerFolderFormat = True
+            if os.path.exists(self.worldFolder.getFolderPath("playerdata")):
+                self.playersFolder = self.worldFolder.getFolderPath("playerdata")
+                self.oldPlayerFolderFormat = False
+            self.players = [x[:-4] for x in os.listdir(self.playersFolder) if x.endswith(".dat")]
+            for player in self.players:
+                try:
+                    UUID(player, version=4)
+                except ValueError:
+                    try:
+                        print "{0} does not seem to be in a valid UUID format".format(player)
+                    except UnicodeEncode:
+                        try:
+                            print u"{0} does not seem to be in a valid UUID format".format(player)
+                        except UnicodeError:
+                            print "{0} does not seem to be in a valid UUID format".format(repr(player))
+                    self.players.remove(player)
+            if "Player" in self.root_tag["Data"]:
+                self.players.append("Player")
 
-        
-        if os.path.exists(self.worldFolder.getFolderPath("data")):
-            if os.path.exists(self.worldFolder.getFolderPath("data")+"/scoreboard.dat"):
-                self._scoreboard = scoreboard.Scoreboard(self, False)
-            else:
-                self._scoreboard = scoreboard.Scoreboard(self, True)
-        else:
-            self._scoreboard = scoreboard.Scoreboard(self, True)
-        
-
-        self.preloadDimensions()
+            self.preloadDimensions()
 
     # --- Load, save, create ---
 
@@ -1131,6 +1141,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         self.RandomSeed = long(random_seed)
         self.SizeOnDisk = 0
         self.Time = 1
+        self.DayTime = 1
         self.LevelName = os.path.basename(self.worldFolder.filename)
 
         # ## if singleplayer:
@@ -1138,16 +1149,23 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         self.createPlayer("Player")
 
     def acquireSessionLock(self):
-        lockfile = self.worldFolder.getFilePath("session.lock")
+        lock_file = self.worldFolder.getFilePath("session.lock")
         self.initTime = int(time.time() * 1000)
-        with file(lockfile, "wb") as f:
+        with file(lock_file, "wb") as f:
             f.write(struct.pack(">q", self.initTime))
             f.flush()
             os.fsync(f.fileno())
 
+        for function in self.lockAcquireFuncs:
+            function()
+
+    def setSessionLockCallback(self, acquire_func, lose_func):
+        self.lockAcquireFuncs.append(acquire_func)
+        self.lockLoseFuncs.append(lose_func)
+
     def checkSessionLock(self):
         if self.readonly:
-            raise SessionLockLost, "World is opened read only."
+            raise SessionLockLost("World is opened read only.")
 
         lockfile = self.worldFolder.getFilePath("session.lock")
         try:
@@ -1155,9 +1173,9 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         except struct.error:
             lock = -1
         if lock != self.initTime:
-            # I should raise an error, but this seems to always fire the exception, so I will just try to aquire it instead
-            # raise SessionLockLost, "Session lock lost. This world is being accessed from another location."
-            self.acquireSessionLock()
+            for function in self.lockLoseFuncs:
+                function()
+            raise SessionLockLost("Session lock lost. This world is being accessed from another location.")
 
     def loadLevelDat(self, create=False, random_seed=None, last_played=None):
 
@@ -1167,6 +1185,10 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         else:
             try:
                 self.root_tag = nbt.load(self.filename)
+                # Load the resource for the game version
+                if self.gameVersion != 'Unknown':
+                    id_definitions.ids_loader(self.gameVersion)
+                #
             except Exception, e:
                 filename_old = self.worldFolder.getFilePath("level.dat_old")
                 log.info("Error loading level.dat, trying level.dat_old ({0})".format(e))
@@ -1180,14 +1202,15 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
                     log.info("Error loading level.dat_old. Initializing with defaults.")
                     self._create(self.filename, random_seed, last_played)
 
-    def saveInPlace(self):
+    def saveInPlaceGen(self):
         if self.readonly:
-            raise IOError, "World is opened read only."
-
+            raise IOError("World is opened read only.")
+        self.saving = True
         self.checkSessionLock()
 
         for level in self.dimensions.itervalues():
-            level.saveInPlace(True)
+            for _ in MCInfdevOldLevel.saveInPlaceGen(level):
+                yield
 
         dirtyChunkCount = 0
         for chunk in self._loadedChunkData.itervalues():
@@ -1197,12 +1220,14 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
                 dirtyChunkCount += 1
                 self.worldFolder.saveChunk(cx, cz, data)
                 chunk.dirty = False
+            yield
 
         for cx, cz in self.unsavedWorkFolder.listChunks():
             if (cx, cz) not in self._loadedChunkData:
                 data = self.unsavedWorkFolder.readChunk(cx, cz)
                 self.worldFolder.saveChunk(cx, cz, data)
                 dirtyChunkCount += 1
+            yield
 
         self.unsavedWorkFolder.closeRegions()
         shutil.rmtree(self.unsavedWorkFolder.filename, True)
@@ -1212,20 +1237,29 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         for path, tag in self.playerTagCache.iteritems():
             tag.save(path)
 
+        if self.playersFolder is not None:
+            for file_ in os.listdir(self.playersFolder):
+                if file_.endswith(".dat") and file_[:-4] not in self.players:
+                    os.remove(os.path.join(self.playersFolder, file_))
+
         self.playerTagCache.clear()
 
         self.root_tag.save(self.filename)
+        self.saving = False
         log.info(u"Saved {0} chunks (dim {1})".format(dirtyChunkCount, self.dimNo))
 
     def unload(self):
         """
         Unload all chunks and close all open filehandles.
         """
+        if self.saving:
+            raise ChunkAccessDenied
         self.worldFolder.closeRegions()
         if not self.readonly:
             self.unsavedWorkFolder.closeRegions()
 
         self._allChunks = None
+        self.recentChunks.clear()
         self._loadedChunks.clear()
         self._loadedChunkData.clear()
 
@@ -1237,6 +1271,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         try:
             self.checkSessionLock()
             shutil.rmtree(self.unsavedWorkFolder.filename, True)
+            shutil.rmtree(self.fileEditsFolder.filename, True)
         except SessionLockLost:
             pass
 
@@ -1266,9 +1301,11 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
     SizeOnDisk = TagProperty('SizeOnDisk', nbt.TAG_Long, 0)
     RandomSeed = TagProperty('RandomSeed', nbt.TAG_Long, 0)
     Time = TagProperty('Time', nbt.TAG_Long, 0)  # Age of the world in ticks. 20 ticks per second; 24000 ticks per day.
+    DayTime = TagProperty('DayTime', nbt.TAG_Long, 0)
     LastPlayed = TagProperty('LastPlayed', nbt.TAG_Long, lambda self: long(time.time() * 1000))
 
     LevelName = TagProperty('LevelName', nbt.TAG_String, lambda self: self.displayName)
+    GeneratorName = TagProperty('generatorName', nbt.TAG_String, 'default')
 
     MapFeatures = TagProperty('MapFeatures', nbt.TAG_Byte, 1)
 
@@ -1289,13 +1326,66 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
 
         return shortname
 
-    @property
-    def scoreboard(self):
-        return self._scoreboard
+    def init_scoreboard(self):
+        if os.path.exists(self.worldFolder.getFolderPath("data")):
+                if os.path.exists(self.worldFolder.getFolderPath("data")+"/scoreboard.dat"):
+                    return nbt.load(self.worldFolder.getFolderPath("data")+"/scoreboard.dat")
+                else:
+                    root_tag = nbt.TAG_Compound()
+                    root_tag["data"] = nbt.TAG_Compound()
+                    root_tag["data"]["Objectives"] = nbt.TAG_List()
+                    root_tag["data"]["PlayerScores"] = nbt.TAG_List()
+                    root_tag["data"]["Teams"] = nbt.TAG_List()
+                    root_tag["data"]["DisplaySlots"] = nbt.TAG_List()
+                    self.save_scoreboard(root_tag)
+                    return root_tag
+        else:
+            self.worldFolder.getFolderPath("data")
+            root_tag = nbt.TAG_Compound()
+            root_tag["data"] = nbt.TAG_Compound()
+            root_tag["data"]["Objectives"] = nbt.TAG_List()
+            root_tag["data"]["PlayerScores"] = nbt.TAG_List()
+            root_tag["data"]["Teams"] = nbt.TAG_List()
+            root_tag["data"]["DisplaySlots"] = nbt.TAG_List()
+            self.save_scoreboard(root_tag)
+            return root_tag
 
-    #@scoreboard.setter
-    #def scoreboard(self, scoreboard):
-    #    self._scoreboard = sb
+    def save_scoreboard(self, score):
+        score.save(self.worldFolder.getFolderPath("data")+"/scoreboard.dat")
+
+    def init_player_data(self):
+        player_data = {}
+        if self.oldPlayerFolderFormat:
+            for p in self.players:
+                if p != "Player":
+                    player_data_file = os.path.join(self.worldFolder.getFolderPath("players"), p+".dat")
+                    player_data[p] = nbt.load(player_data_file)
+                else:
+                    data = nbt.load(self.worldFolder.getFilePath("level.dat"))
+                    player_data[p] = data["Data"]["Player"]
+        else:
+            for p in self.players:
+                if p != "Player":
+                    player_data_file = os.path.join(self.worldFolder.getFolderPath("playerdata"), p+".dat")
+                    player_data[p] = nbt.load(player_data_file)
+                else:
+                    data = nbt.load(self.worldFolder.getFilePath("level.dat"))
+                    player_data[p] = data["Data"]["Player"]
+
+        #player_data = []
+        #for p in [x for x in os.listdir(self.playersFolder) if x.endswith(".dat")]:
+                #player_data.append(player.Player(self.playersFolder+"\\"+p))
+        return player_data
+
+    def save_player_data(self, player_data):
+        if self.oldPlayerFolderFormat:
+            for p in player_data.keys():
+                if p != "Player":
+                    player_data[p].save(os.path.join(self.worldFolder.getFolderPath("players"), p+".dat"))
+        else:
+            for p in player_data.keys():
+                if p != "Player":
+                    player_data[p].save(os.path.join(self.worldFolder.getFolderPath("playerdata"), p+".dat"))
 
     @property
     def bounds(self):
@@ -1327,7 +1417,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
     @classmethod
     def _isLevel(cls, filename):
 
-        if os.path.exists(os.path.join(filename, "chunks.dat")):
+        if os.path.exists(os.path.join(filename, "chunks.dat")) or os.path.exists(os.path.join(filename, "db")):
             return False  # exclude Pocket Edition folders
 
         if not os.path.isdir(filename):
@@ -1337,6 +1427,8 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
             filename = os.path.dirname(filename)
 
         files = os.listdir(filename)
+        if "db" in files:
+            return False
         if "level.dat" in files or "level.dat_old" in files:
             return True
 
@@ -1377,7 +1469,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         self._allChunks.update(self._loadedChunkData.iterkeys())
 
     def getRegionForChunk(self, cx, cz):
-        return self.worldFolder.getRegionFile(cx, cz)
+        return self.worldFolder.getRegionForChunk(cx, cz)
 
     # --- Chunk I/O ---
 
@@ -1386,7 +1478,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
 
     def _dirhash(self):
         n = self
-        n = n % 64
+        n %= 64
         s = u""
         if n >= 36:
             s += u"1"
@@ -1439,7 +1531,9 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         """
         assert isinstance(world, MCInfdevOldLevel)
         if self.readonly:
-            raise IOError, "World is opened read only."
+            raise IOError("World is opened read only.")
+        if world.saving | self.saving:
+            raise ChunkAccessDenied
         self.checkSessionLock()
 
         destChunk = self._loadedChunks.get((cx, cz))
@@ -1489,7 +1583,11 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
 
     def _getChunkData(self, cx, cz):
         chunkData = self._loadedChunkData.get((cx, cz))
-        if chunkData is not None: return chunkData
+        if chunkData is not None:
+            return chunkData
+
+        if self.saving:
+            raise ChunkAccessDenied
 
         try:
             data = self._getChunkBytes(cx, cz)
@@ -1498,7 +1596,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         except (MemoryError, ChunkNotPresent):
             raise
         except Exception, e:
-            raise ChunkMalformed, "Chunk {0} had an error: {1!r}".format((cx, cz), e), sys.exc_info()[2]
+            raise ChunkMalformed("Chunk {0} had an error: {1!r}".format((cx, cz), e), sys.exc_info()[2])
 
         if not self.readonly and self.unsavedWorkFolder.containsChunk(cx, cz):
             chunkData.dirty = True
@@ -1535,6 +1633,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         chunk = AnvilChunk(chunkData)
 
         self._loadedChunks[cx, cz] = chunk
+        self.recentChunks.append(chunk)
         return chunk
 
     def markDirtyChunk(self, cx, cz):
@@ -1563,6 +1662,20 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
 
         return heightMap[zInChunk, xInChunk]  # HeightMap indices are backwards
 
+    # --- Biome manipulation ---
+
+    def biomeAt(self, x, z):
+        biomes = self.getChunk(int(x/16),int(z/16)).root_tag["Level"]["Biomes"].value
+        xChunk = int(x/16) * 16
+        zChunk = int(z/16) * 16
+        return biomes[(z - zChunk) * 16 + (x - xChunk)]
+
+    def setBiomeAt(self, x, z, biomeID):
+        biomes = self.getChunk(int(x/16), int(z/16)).root_tag["Level"]["Biomes"].value
+        xChunk = int(x/16) * 16
+        zChunk = int(z/16) * 16
+        biomes[(z - zChunk) * 16 + (x - xChunk)] = biomeID
+
     # --- Entities and TileEntities ---
 
     def addEntity(self, entityTag):
@@ -1583,7 +1696,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
 
     def addTileEntity(self, tileEntityTag):
         assert isinstance(tileEntityTag, nbt.TAG_Compound)
-        if not 'x' in tileEntityTag:
+        if 'x' not in tileEntityTag:
             return
         x, y, z = TileEntity.pos(tileEntityTag)
 
@@ -1598,7 +1711,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
     def addTileTick(self, tickTag):
         assert isinstance(tickTag, nbt.TAG_Compound)
 
-        if not 'x' in tickTag:
+        if 'x' not in tickTag:
             return
         x, y, z = TileTick.pos(tickTag)
         try:
@@ -1615,10 +1728,17 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
 
         return entities
 
+    def getTileEntitiesInBox(self, box):
+        tileEntites = []
+        for chunk, slices, point in self.getChunkSlices(box):
+            tileEntites += chunk.getTileEntitiesInBox(box)
+
+        return tileEntites
+
     def getTileTicksInBox(self, box):
         tileticks = []
         for chunk, slices, point in self.getChunkSlices(box):
-            tileticks += chunk.getEntitiesInBox(box)
+            tileticks += chunk.getTileTicksInBox(box)
 
         return tileticks
 
@@ -1699,7 +1819,6 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
 
         self._bounds = None
 
-
     def deleteChunksInBox(self, box):
         log.info(u"Deleting {0} chunks in {1}".format((box.maxcx - box.mincx) * (box.maxcz - box.mincz),
                                                       ((box.mincx, box.mincz), (box.maxcx, box.maxcz))))
@@ -1742,9 +1861,12 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         for name, val in zip(("SpawnX", "SpawnY", "SpawnZ"), pos):
             playerSpawnTag[name] = nbt.TAG_Int(val)
 
-    def getPlayerPath(self, player):
+    def getPlayerPath(self, player, dim=0):
         assert player != "Player"
-        return os.path.join(self.playersFolder, "%s.dat" % player)
+        if dim != 0:
+            return os.path.join(os.path.dirname(self.level.filename), "DIM%s" % dim, "playerdata", "%s.dat" % player)
+        else:
+            return os.path.join(self.playersFolder, "%s.dat" % player)
 
     def getPlayerTag(self, player="Player"):
         if player == "Player":
@@ -1754,15 +1876,14 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
             raise PlayerNotFound(player)
         else:
             playerFilePath = self.getPlayerPath(player)
-            if os.path.exists(playerFilePath):
-                # multiplayer world, found this player
-                playerTag = self.playerTagCache.get(playerFilePath)
-                if playerTag is None:
+            playerTag = self.playerTagCache.get(playerFilePath)
+            if playerTag is None:
+                if os.path.exists(playerFilePath):
                     playerTag = nbt.load(playerFilePath)
                     self.playerTagCache[playerFilePath] = playerTag
-                return playerTag
-            else:
-                raise PlayerNotFound(player)
+                else:
+                    raise PlayerNotFound(player)
+            return playerTag
 
     def getPlayerDimension(self, player="Player"):
         playerTag = self.getPlayerTag(player)
@@ -1777,7 +1898,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         playerTag["Dimension"].value = d
 
     def setPlayerPosition(self, (x, y, z), player="Player"):
-        posList = nbt.TAG_List([nbt.TAG_Double(p) for p in (x, y - 1.8, z)])
+        posList = nbt.TAG_List([nbt.TAG_Double(p) for p in (x, y - 1.75, z)])
         playerTag = self.getPlayerTag(player)
 
         playerTag["Pos"] = posList
@@ -1787,7 +1908,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         posList = playerTag["Pos"]
 
         x, y, z = map(lambda x: x.value, posList)
-        return x, y + 1.8, z
+        return x, y + 1.75, z
 
     def setPlayerOrientation(self, yp, player="Player"):
         self.getPlayerTag(player)["Rotation"] = nbt.TAG_List([nbt.TAG_Float(p) for p in yp])
@@ -1808,7 +1929,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
 
         # Check for the Abilities tag.  It will be missing in worlds from before
         # Beta 1.9 Prerelease 5.
-        if not 'abilities' in playerTag:
+        if 'abilities' not in playerTag:
             playerTag['abilities'] = nbt.TAG_Compound()
 
         # Assumes creative (1) is the only mode with these abilities set,
@@ -1864,10 +1985,7 @@ class MCInfdevOldLevel(ChunkedLevelMixin, EntityLevel):
         playerTag['Rotation'] = nbt.TAG_List([nbt.TAG_Float(0), nbt.TAG_Float(0)])
 
         if playerName != "Player":
-            if self.readonly:
-                raise IOError, "World is opened read only."
-            self.checkSessionLock()
-            playerTag.save(self.getPlayerPath(playerName))
+            self.playerTagCache[self.getPlayerPath(playerName)] = playerTag
 
 
 class MCAlphaDimension(MCInfdevOldLevel):

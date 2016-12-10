@@ -2,14 +2,13 @@
 # Albow - Table View
 #
 #-# Modified by D.C.-G. for translation purpose
-from itertools import izip
 from pygame import Rect
 from layout import Column
 from palette_view import PaletteView
 from utils import blit_in_rect
-#-#
 from translate import _
-#-#
+
+
 class TableView(Column):
     columns = []
     header_font = None
@@ -26,7 +25,7 @@ class TableView(Column):
             font = self.predict_font(kwds)
             row_height = font.get_linesize()
         if header_height is None:
-            header_height = row_height
+            self.header_height = header_height = row_height
         row_width = 0
         if columns:
             for column in columns:
@@ -46,8 +45,8 @@ class TableView(Column):
         Column.__init__(self, contents, align='l', spacing=s, **kwds)
         if header:
             header.font = self.header_font or self.font
-            header.fg_color = fg_color = self.header_fg_color or self.fg_color
-            header.bg_color = bg_color = self.header_bg_color or self.bg_color
+            header.fg_color = self.header_fg_color or self.fg_color
+            header.bg_color = self.header_bg_color or self.bg_color
         rows.font = self.font
         rows.fg_color = self.fg_color
         rows.bg_color = self.bg_color
@@ -79,13 +78,15 @@ class TableView(Column):
         buf = font.render(unicode(data), True, self.fg_color)
         blit_in_rect(surf, buf, cell_rect, align)
 
-    def row_is_selected(self, n):
+    @staticmethod
+    def row_is_selected(n):
         return False
 
     def click_row(self, n, e):
         pass
 
-    def click_column_header(self, col):
+    @staticmethod
+    def click_column_header(col):
         print "click_column_header: ", col
 
     def click_header(self, n, e):
@@ -171,7 +172,7 @@ class TableHeaderView(TableRowBase):
     #        self.parent.draw_header_cell(surf, i, text, cell_rect, column)
 
     def row_data(self, row):
-        None
+        pass
 
     def draw_table_cell(self, surf, i, data, cell_rect, column):
         self.parent.draw_header_cell(surf, i, cell_rect, column)

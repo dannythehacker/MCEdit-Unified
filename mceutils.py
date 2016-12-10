@@ -11,6 +11,7 @@ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
 WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE."""
+# import resource_packs # not the right place, moving it a bit furtehr
 
 """
 mceutils.py
@@ -18,30 +19,35 @@ mceutils.py
 Exception catching, some basic box drawing, texture pack loading, oddball UI elements
 """
 # Modified by D.C.-G. for translation purpose
+#.# Marks the layout modifications. -- D.C.-G.
+#!#
+#!# The stuff in there related to albow should be in albow module.
+#!# This stuff will then be available for components base classes in this GUI module.
+#!# And make albow/widgets more coherent to use.
+#!#
+from resource_packs import ResourcePackHandler
 from albow.controls import ValueDisplay
 from albow import alert, ask, Button, Column, Label, root, Row, ValueButton, Widget
-#-#
 from albow.translate import _
-#-#
-import config
-from cStringIO import StringIO
 from datetime import datetime
 import directories
-import httplib
-import mcplatform
 import numpy
-from OpenGL import GL, GLU
+from OpenGL import GL
 import os
-import platform
 import png
-from pygame import display, image, Surface
+from pygame import display
 import pymclevel
-import release
-import sys
-import traceback
-import zipfile
+import json
+import hashlib
+import shutil
 
 import logging
+
+#!# Used to track the ALBOW stuff imported from here
+def warn(obj):
+    name = getattr(obj, '__name__', getattr(getattr(obj, '__class__', obj), '__name__', obj))
+    logging.getLogger().warn('%s.%s is deprecated and will be removed. Use albow.%s instead.'%(obj.__module__, name, name))
+#!#
 
 
 def alertException(func):
@@ -51,21 +57,10 @@ def alertException(func):
         except root.Cancel:
             alert("Canceled.")
         except pymclevel.infiniteworld.SessionLockLost as e:
-            alert(e.message + _("\n\nYour changes cannot be saved."))
-
+            alert(_(e.message) + _("\n\nYour changes cannot be saved."))
         except Exception, e:
             logging.exception("Exception:")
-            if ask(_("Error during {0}: {1!r}").format(func, e)[:1000], ["Report Error", "Okay"], default=1,
-                   cancel=0) == "Report Error":
-                try:
-                    import squash_python
-
-                    squash_python.get_client().recordException(*sys.exc_info())
-                except ImportError:
-                    pass
-                except Exception:
-                    logging.exception("Error while recording exception data:")
-
+            ask(_("Error during {0}: {1!r}").format(func, e)[:1000], ["OK"], cancel=0)
     return _alertException
 
 
@@ -190,7 +185,7 @@ def drawCube(box, cubeType=GL.GL_QUADS, blockType=0, texture=None, textureVertic
             x2, y2, z,
             x2, y2, z2,
         ), dtype='f4')
-    if textureVertices == None:
+    if textureVertices is None:
         textureVertices = numpy.array(
             (
                 0, -dy * 16,
@@ -234,7 +229,7 @@ def drawCube(box, cubeType=GL.GL_QUADS, blockType=0, texture=None, textureVertic
             textureVertices[:] += 0.5
 
     GL.glVertexPointer(3, GL.GL_FLOAT, 0, cubeVertices)
-    if texture != None:
+    if texture is not None:
         GL.glEnable(GL.GL_TEXTURE_2D)
         GL.glEnableClientState(GL.GL_TEXTURE_COORD_ARRAY)
 
@@ -248,7 +243,7 @@ def drawCube(box, cubeType=GL.GL_QUADS, blockType=0, texture=None, textureVertic
     GL.glDisable(GL.GL_POLYGON_OFFSET_FILL)
     GL.glDisable(GL.GL_POLYGON_OFFSET_LINE)
 
-    if texture != None:
+    if texture is not None:
         GL.glDisableClientState(GL.GL_TEXTURE_COORD_ARRAY)
         GL.glDisable(GL.GL_TEXTURE_2D)
 
@@ -274,13 +269,8 @@ def drawTerrainCuttingWire(box,
     # glDepthMask(True)
 
 
-# texturePacksDir = os.path.join(pymclevel.minecraftDir, "texturepacks")
-
-
 def loadAlphaTerrainTexture():
-    pngFile = None
-
-    texW, texH, terraindata = loadPNGFile(os.path.join(directories.dataDir, "terrain.png"))
+    texW, texH, terraindata = loadPNGFile(os.path.join(directories.getDataDir(),  ResourcePackHandler.Instance().get_selected_resource_pack().terrain_path()))
 
     def _loadFunc():
         loadTextureFunc(texW, texH, terraindata)
@@ -321,7 +311,7 @@ def loadTextureFunc(w, h, ndata):
 
 
 def loadPNGTexture(filename, *a, **kw):
-    filename = os.path.join(directories.dataDir, filename)
+    filename = os.path.join(directories.getDataDir(), filename)
     try:
         w, h, ndata = loadPNGFile(filename)
 
@@ -361,35 +351,57 @@ def normalize_size(x):
 class HotkeyColumn(Widget):
     is_gl_container = True
 
-    def __init__(self, items, keysColumn=None, buttonsColumn=None):
+    def __init__(self, items, keysColumn=None, buttonsColumn=None, item_spacing=None):
+        warn(self)
         if keysColumn is None:
             keysColumn = []
         if buttonsColumn is None:
             buttonsColumn = []
+        labels = []
 
         Widget.__init__(self)
-        for (hotkey, title, action) in items:
+        for t in items:
+            if len(t) == 3:
+                (hotkey, title, action) = t
+                tooltipText = None
+            else:
+                (hotkey, title, action, tooltipText) = t
             if isinstance(title, (str, unicode)):
                 button = Button(title, action=action)
             else:
                 button = ValueButton(ref=title, action=action, width=200)
             button.anchor = self.anchor
 
-            label = Label(hotkey, width=75, margin=button.margin)
+            label = Label(hotkey, width=100, margin=button.margin)
             label.anchor = "wh"
 
             label.height = button.height
+
+            labels.append(label)
+
+            if tooltipText:
+                button.tooltipText = tooltipText
 
             keysColumn.append(label)
             buttonsColumn.append(button)
 
         self.buttons = list(buttonsColumn)
 
-        buttonsColumn = Column(buttonsColumn)
+        #.#
+        if item_spacing == None:
+            buttonsColumn = Column(buttonsColumn)
+        else:
+            buttonsColumn = Column(buttonsColumn, spacing=item_spacing)
+        #.#
         buttonsColumn.anchor = self.anchor
-        keysColumn = Column(keysColumn)
+        #.#
+        if item_spacing == None:
+            keysColumn = Column(keysColumn)
+        else:
+            keysColumn = Column(keysColumn, spacing=item_spacing)
 
         commandRow = Row((keysColumn, buttonsColumn))
+        self.labels = labels
         self.add(commandRow)
         self.shrink_wrap()
 
@@ -399,6 +411,7 @@ from albow import CheckBox, AttrRef, Menu
 
 class MenuButton(Button):
     def __init__(self, title, choices, **kw):
+        warn(self)
         Button.__init__(self, title, **kw)
         self.choices = choices
         self.menu = Menu(title, ((c, c) for c in choices))
@@ -419,6 +432,7 @@ class ChoiceButton(ValueButton):
 
     def __init__(self, choices, scrolling=True, scroll_items=30, **kw):
         # passing an empty list of choices is ill-advised
+        warn(self)
 
         if 'choose' in kw:
             self.choose = kw.pop('choose')
@@ -429,7 +443,7 @@ class ChoiceButton(ValueButton):
         self.scroll_items = scroll_items
         self.choices = choices or ["[UNDEFINED]"]
 
-        widths = [self.font.size(c)[0] for c in choices] + [self.width]
+        widths = [self.font.size(_(c))[0] for c in choices] + [self.width]
         if len(widths):
             self.width = max(widths) + self.margin * 2
 
@@ -469,6 +483,7 @@ class ChoiceButton(ValueButton):
 
 
 def CheckBoxLabel(title, *args, **kw):
+    warn(CheckBoxLabel)
     tooltipText = kw.pop('tooltipText', None)
 
     cb = CheckBox(*args, **kw)
@@ -495,14 +510,16 @@ def CheckBoxLabel(title, *args, **kw):
     return row
 
 
-from albow import FloatField, IntField, TextField
+from albow import FloatField, IntField, TextFieldWrapped
 
 
 def FloatInputRow(title, *args, **kw):
+    warn(FloatInputRow)
     return Row((Label(title, tooltipText=kw.get('tooltipText')), FloatField(*args, **kw)))
 
 
 def IntInputRow(title, *args, **kw):
+    warn(IntInputRow)
     return Row((Label(title, tooltipText=kw.get('tooltipText')), IntField(*args, **kw)))
 
 
@@ -511,7 +528,8 @@ from datetime import timedelta
 
 
 def TextInputRow(title, *args, **kw):
-    return Row((Label(title, tooltipText=kw.get('tooltipText')), TextField(*args, **kw)))
+    warn(TextInputRow)
+    return Row((Label(title, tooltipText=kw.get('tooltipText')), TextFieldWrapped(*args, **kw)))
 
 
 def setWindowCaption(prefix):
@@ -519,6 +537,7 @@ def setWindowCaption(prefix):
     prefix = _(prefix)
     if type(prefix) == unicode:
         prefix = prefix.encode("utf8")
+
     class ctx:
         def __enter__(self):
             display.set_caption(prefix + caption)
@@ -537,11 +556,16 @@ def showProgress(progressText, progressIterator, cancel=False):
     A string, to update the progress info label
     or a tuple of (float value, string) to set the progress and update the label"""
 
+    warn(ShowProgress)
+
     class ProgressWidget(Dialog):
         progressFraction = 0.0
         firstDraw = False
+        root = None
 
         def draw(self, surface):
+            if self.root is None:
+                self.root = self.get_root()
             Widget.draw(self, surface)
             frameStart = datetime.now()
             frameInterval = timedelta(0, 1, 0) / 2
@@ -588,8 +612,10 @@ def showProgress(progressText, progressIterator, cancel=False):
 
         @property
         def estimateText(self):
-            delta = ((datetime.now() - self.startTime))
+            delta = (datetime.now() - self.startTime)
             progressPercent = (int(self.progressFraction * 10000))
+            if progressPercent > 10000:
+                progressPercent = 10000
             left = delta * (10000 - progressPercent) / (progressPercent or 1)
             return _("Time left: {0}").format(left)
 
@@ -599,6 +625,20 @@ def showProgress(progressText, progressIterator, cancel=False):
 
         def idleevent(self, evt):
             self.invalidate()
+
+        def key_down(self, event):
+            pass
+
+        def key_up(self, event):
+            pass
+
+        def mouse_up(self, event):
+            try:
+                if "SelectionTool" in str(self.root.editor.currentTool):
+                    if self.root.get_nudge_block().count > 0:
+                        self.root.get_nudge_block().mouse_up(event)
+            except:
+                pass
 
     widget = ProgressWidget()
     widget.progressText = _(progressText)

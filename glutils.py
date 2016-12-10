@@ -19,14 +19,8 @@ Pythonesque wrappers around certain OpenGL functions.
 """
 
 from OpenGL import GL
-from OpenGL.GL.ARB import window_pos
 import numpy
-import functools
 from contextlib import contextmanager
-
-from albow import Label
-from albow.openglwidgets import GLOrtho
-import config
 
 import weakref
 from OpenGL.GL import framebufferobjects as FBO
@@ -120,15 +114,15 @@ class DisplayList(object):
         self.invalidate()
 
     @classmethod
-    def invalidateAllLists(self):
+    def invalidateAllLists(cls):
         allLists = []
-        for listref in self.allLists:
+        for listref in cls.allLists:
             list = listref()
             if list:
                 list.invalidate()
                 allLists.append(listref)
 
-        self.allLists = allLists
+        cls.allLists = allLists
 
     def invalidate(self):
         if self._list:

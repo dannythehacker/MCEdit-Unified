@@ -9,15 +9,13 @@ from OpenGL.GL import *
 from OpenGL.GLU import *
 from OpenGL.GLUT import *
 from albow import *
-from pygame import Rect, Surface, draw, image
+from pygame import Rect, Surface, image
 from pygame.locals import SRCALPHA
 from widget import Widget
 from theme import ThemeProperty, FontProperty
 from utils import brighten
 from numpy import fromstring
-#-#
-from translate import _
-#-#
+from translate import _ # useless?
 
 
 class TabPanel(Widget):
@@ -58,15 +56,18 @@ class TabPanel(Widget):
     def page_height(self):
         return self.height - self.tab_height
 
-    def add_page(self, title, page):
-        self._add_page(title, page)
+    def add_page(self, title, page, idx=None):
+        self._add_page(title, page, idx)
         if not self.current_page:
             self.show_page(page)
 
-    def _add_page(self, title, page):
+    def _add_page(self, title, page, idx=None):
         page.tab_title = _(title)
         page.anchor = 'ltrb'
-        self.pages.append(page)
+        if idx is not None:
+            self.pages.insert(idx, page)
+        else:
+            self.pages.append(page)
 
     def remove_page(self, page):
         try:
@@ -144,14 +145,16 @@ class TabPanel(Widget):
 
     def tab_bg_color_for_page(self, page):
         return getattr(page, 'tab_bg_color', None) \
-               or page.bg_color \
-               or self.default_tab_bg_color
+            or page.bg_color \
+            or self.default_tab_bg_color
 
     def mouse_down(self, e):
         x, y = e.local
         if y < self.tab_height:
             i = self.tab_number_containing_x(x)
             if i is not None:
+                if self.current_page:
+                    self.current_page.dispatch_attention_loss()
                 self.show_page(self.pages[i])
 
     def tab_number_containing_x(self, x):
@@ -170,7 +173,6 @@ class TabPanel(Widget):
 
         if len(pages) > 1:
             tlcorner = (offset[0] + self.bottomleft[0], offset[1] + self.bottomleft[1])
-            pageTabContents = []
             current_page = self.current_page
             n = len(pages)
             b = self.tab_border_width
@@ -178,7 +180,6 @@ class TabPanel(Widget):
             h = self.tab_height
             m = self.tab_margin
             tabWidth = (self.size[0] - (s * n) - (2 * m)) / n
-            width = self.width - 2 * m + s - b
             x0 = m + tlcorner[0]
 
             font = self.tab_font
@@ -194,7 +195,7 @@ class TabPanel(Widget):
                     glColor(1.0, 1.0, 1.0, 0.5)
                 else:
                     glColor(0.5, 0.5, 0.5, 0.5)
-                glRectf(x0, tlcorner[1] - (m + b), x1, tlcorner[1] - (h))
+                glRectf(x0, tlcorner[1] - (m + b), x1, tlcorner[1] - h)
                 buf = font.render(self.pages[i].tab_title, True, self.fg_color or fg)
                 r = buf.get_rect()
 

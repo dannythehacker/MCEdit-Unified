@@ -17,23 +17,26 @@ from OpenGL import GL
 import numpy
 from numpy import newaxis
 
-from albow import Label, ValueDisplay, AttrRef, Button, Column, ask, Row, alert, Widget, Menu
-#-#
+from albow import Label, ValueDisplay, AttrRef, Button, Column, ask, Row, alert, Widget, Menu, showProgress, \
+    ChoiceButton, IntInputRow, CheckBoxLabel
 from albow.translate import _
-#-#
 from editortools.editortool import EditorTool
 from glbackground import Panel
 from glutils import DisplayList, gl
-from mceutils import alertException, setWindowCaption, showProgress, ChoiceButton, IntInputRow, CheckBoxLabel
+from mceutils import alertException, setWindowCaption
 import mcplatform
+import directories
 import pymclevel
 from pymclevel.minecraft_server import MCServerChunkGenerator
+from config import config
 
 from albow.dialogs import Dialog
 
 
 class ChunkToolPanel(Panel):
     def __init__(self, tool, *a, **kw):
+        if 'name' not in kw.keys():
+            kw['name'] = 'Panel.ChunkToolPanel'
         Panel.__init__(self, *a, **kw)
 
         self.tool = tool
@@ -45,11 +48,6 @@ class ChunkToolPanel(Panel):
         self.chunksLabel = ValueDisplay(ref=AttrRef(self, 'chunkSizeText'), width=115)
         self.chunksLabel.align = "c"
         self.chunksLabel.tooltipText = "..."
-
-        extractButton = Button("Extract")
-        extractButton.tooltipText = "Extract these chunks to individual chunk files"
-        extractButton.action = tool.extractChunks
-        extractButton.highlight_color = (255, 255, 255)
 
         deselectButton = Button("Deselect",
                                 tooltipText=None,
@@ -86,7 +84,7 @@ class ChunkToolPanel(Panel):
 
         col = Column((
         chunkToolLabel, self.chunksLabel, deselectButton, createButton, destroyButton, pruneButton, relightButton,
-        extractButton, repopButton, dontRepopButton))
+        repopButton, dontRepopButton))
         # col.right = self.width - 10;
         self.width = col.width
         self.height = col.height
@@ -108,7 +106,7 @@ class ChunkTool(EditorTool):
 
     @property
     def statusText(self):
-        return _("Click and drag to select chunks. Hold ALT to deselect chunks. Hold SHIFT to select chunks.")
+        return _("Click and drag to select chunks. Hold {0} to deselect chunks. Hold {1} to select chunks.").format(_(config.keys.deselectChunks.get()), _(config.keys.selectChunks.get()))
 
     def toolEnabled(self):
         return isinstance(self.editor.level, pymclevel.ChunkedLevelMixin)
@@ -212,28 +210,15 @@ class ChunkTool(EditorTool):
         self.panel.left = 10
 
         self.editor.add(self.panel)
+        
+    def toolDeselected(self):
+        self.editor.chunksToSelection()
 
     def cancel(self):
         self.editor.remove(self.panel)
 
     def selectedChunks(self):
         return self.editor.selectedChunks
-
-    @alertException
-    def extractChunks(self):
-        folder = mcplatform.askSaveFile(mcplatform.docsFolder,
-                                        title='Export chunks to...',
-                                        defaultName=self.editor.level.displayName + "_chunks",
-                                        filetype='Folder\0*.*\0\0',
-                                        suffix="",
-        )
-        if not folder:
-            return
-
-        # TODO: We need a third dimension, Scotty!
-        for cx, cz in self.selectedChunks():
-            if self.editor.level.containsChunk(cx, cz):
-                self.editor.level.extractChunk(cx, cz, folder)
 
     @alertException
     def destroyChunks(self, chunks=None):
@@ -260,7 +245,7 @@ class ChunkTool(EditorTool):
             showProgress("Deleting chunks...", _destroyChunks())
 
         self.editor.renderer.invalidateChunkMarkers()
-        self.editor.renderer.discardChunks(chunks)
+        self.editor.renderer.discardAllChunks()
         # self.editor.addUnsavedEdit()
 
     @alertException
@@ -270,6 +255,7 @@ class ChunkTool(EditorTool):
         self.editor.saveFile()
 
         def _pruneChunks():
+            maxChunks = self.editor.level.chunkCount
             selectedChunks = self.selectedChunks()
             for i, cPos in enumerate(list(self.editor.level.allChunks)):
                 if cPos not in selectedChunks:
@@ -279,7 +265,7 @@ class ChunkTool(EditorTool):
                     except Exception, e:
                         print "Error during chunk delete: ", e
 
-                yield i, self.editor.level.chunkCount
+                yield i, maxChunks
 
         with setWindowCaption("PRUNING - "):
             showProgress("Pruning chunks...", _pruneChunks())
@@ -352,6 +338,12 @@ class ChunkTool(EditorTool):
 
     def mouseUp(self, evt, *args):
         self.editor.selectionTool.mouseUp(evt, *args)
+
+    def keyDown(self, evt):
+        self.editor.selectionTool.keyDown(evt)
+
+    def keyUp(self, evt):
+        self.editor.selectionTool.keyUp(evt)
 
 
 def GeneratorPanel():
@@ -454,7 +446,7 @@ def GeneratorPanel():
 
     panel.shrink_wrap()
 
-    def generate(level, arg):
+    def generate(level, arg, useWorldType="DEFAULT"):
         useServer = generatorChoice.selectedChoice == "Minecraft Server"
 
         if useServer:
@@ -466,7 +458,7 @@ def GeneratorPanel():
                 gen = MCServerChunkGenerator(version=version)
 
                 if isinstance(arg, pymclevel.BoundingBox):
-                    for i in gen.createLevelIter(level, arg, simulate=panel.simulate):
+                    for i in gen.createLevelIter(level, arg, simulate=panel.simulate, worldType=useWorldType):
                         yield i
                 else:
                     for i in gen.generateChunksInLevelIter(level, arg, simulate=panel.simulate):

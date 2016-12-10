@@ -4,7 +4,6 @@ Created on Jul 22, 2011
 @author: Rio
 '''
 
-import blockrotation
 from box import BoundingBox
 from collections import defaultdict
 from entity import Entity, TileEntity, TileTick
@@ -12,7 +11,7 @@ import itertools
 from logging import getLogger
 import materials
 from math import floor
-from mclevelbase import ChunkMalformed, ChunkNotPresent, exhaust
+from mclevelbase import ChunkMalformed, ChunkNotPresent
 import nbt
 from numpy import argmax, swapaxes, zeros, zeros_like
 import os.path
@@ -130,6 +129,8 @@ class MCLevel(object):
     materials = materials.classicMaterials
     isInfinite = False
 
+    saving = False
+
     root_tag = None
 
     Height = None
@@ -140,6 +141,25 @@ class MCLevel(object):
     dimNo = 0
     parentWorld = None
     world = None
+
+    entityClass = Entity
+
+    # Game version check. Stores the info found in the 'Version::Name' tag
+
+    @property
+    def gameVersion(self):
+        """Return the content of the tag 'Name' in the tag 'Version', or 'Unknown'"""
+        if self.root_tag and not hasattr(self, '__gameVersion'):
+            self.__gameVersion = 'Unknown'
+            if 'Data' in self.root_tag and type(self.root_tag['Data']) == nbt.TAG_Compound:
+                # We're opening a world.
+                if 'Version' in self.root_tag['Data']:
+                    if 'Name' in self.root_tag['Data']['Version']:
+                        self.__gameVersion = self.root_tag['Data']['Version']['Name'].value
+            else:
+                if self.root_tag.name:
+                    self.__gameVersion = self.root_tag.name
+        return self.__gameVersion
 
     @classmethod
     def isLevel(cls, filename):
@@ -264,7 +284,7 @@ class MCLevel(object):
         f.BlockLight = whiteLight
         f.SkyLight = whiteLight
 
-        f.Entities, f.TileEntities = self._getFakeChunkEntities(cx, cz)
+        f.Entities, f.TileEntities, f.TileTicks = self._getFakeChunkEntities(cx, cz)
 
         f.root_tag = nbt.TAG_Compound()
 
@@ -395,9 +415,14 @@ class MCLevel(object):
 
     from block_copy import copyBlocksFrom, copyBlocksFromIter
 
+    def saveInPlaceGen(self):
+        self.saveToFile(self.filename)
+        yield
 
     def saveInPlace(self):
-        self.saveToFile(self.filename)
+        gen = self.saveInPlaceGen()
+        for _ in gen:
+            pass
 
     # --- Player Methods ---
     def setPlayerPosition(self, pos, player="Player"):
@@ -444,15 +469,17 @@ class EntityLevel(MCLevel):
         return [ent for ent in self.TileEntities if TileEntity.pos(ent) in box]
 
     def getTileTicksInBox(self, box):
+        if hasattr(self, "TileTicks"):
+            return [ent for ent in self.TileTicks if TileTick.pos(ent) in box]
+        else:
+            return []
 
-        return [ent for ent in self.TileTicks if TileTick.pos(ent) in box]
-
-
-    def removeEntitiesInBox(self, box):
-
+    def removeEntities(self, func):
+        if not hasattr(self, "Entities"):
+            return
         newEnts = []
         for ent in self.Entities:
-            if Entity.pos(ent) in box:
+            if func(Entity.pos(ent)):
                 continue
             newEnts.append(ent)
 
@@ -463,13 +490,15 @@ class EntityLevel(MCLevel):
 
         return entsRemoved
 
-    def removeTileEntitiesInBox(self, box):
+    def removeEntitiesInBox(self, box):
+        return self.removeEntities(lambda p: p in box)
 
+    def removeTileEntities(self, func):
         if not hasattr(self, "TileEntities"):
             return
         newEnts = []
         for ent in self.TileEntities:
-            if TileEntity.pos(ent) in box:
+            if func(TileEntity.pos(ent)):
                 continue
             newEnts.append(ent)
 
@@ -480,12 +509,15 @@ class EntityLevel(MCLevel):
 
         return entsRemoved
 
-    def removeTileTicksInBox(self, box):
-        #if not hasattr(self, "TileTicks"):
-        #    return
+    def removeTileEntitiesInBox(self, box):
+        return self.removeTileEntities(lambda p: p in box)
+
+    def removeTileTicks(self, func):
+        if not hasattr(self, "TileTicks"):
+            return
         newEnts = []
         for ent in self.TileTicks:
-            if TileTick.pos(ent) in box:
+            if func(TileTick.pos(ent)):
                 continue
             newEnts.append(ent)
 
@@ -495,6 +527,9 @@ class EntityLevel(MCLevel):
         self.TileTicks.value[:] = newEnts
 
         return entsRemoved
+
+    def removeTileTicksInBox(self, box):
+        return self.removeTileTicks(lambda p: p in box)
 
     def addEntities(self, entities):
         for e in entities:
@@ -531,14 +566,14 @@ class EntityLevel(MCLevel):
 
     def addTileTick(self, tickTag):
         assert isinstance(tickTag, nbt.TAG_Compound)
+        if hasattr(self, "TileTicks"):
+            def differentPosition(a):
+                return not ((tickTag is a) or TileTick.pos(a) == TileTick.pos(tickTag))
 
-        def differentPosition(a):
-            return not ((tickTag is a) or TileTick.pos(a) == TileTick.pos(tickTag))
+            self.TileTicks.value[:] = filter(differentPosition, self.TileTicks)
 
-        self.TileTicks.value[:] = filter(differentPosition, self.TileTicks)
-
-        self.TileTicks.append(tickTag)
-        self._fakeEntities = None
+            self.TileTicks.append(tickTag)
+            self._fakeEntities = None
 
     def addTileTicks(self, tileTicks):
         for e in tileTicks:
@@ -548,12 +583,12 @@ class EntityLevel(MCLevel):
 
     def _getFakeChunkEntities(self, cx, cz):
         """distribute entities into sublists based on fake chunk position
-        _fakeEntities keys are (cx, cz) and values are (Entities, TileEntities)"""
+        _fakeEntities keys are (cx, cz) and values are (Entities, TileEntities, TileTicks)"""
         if self._fakeEntities is None:
-            self._fakeEntities = defaultdict(lambda: (nbt.TAG_List(), nbt.TAG_List()))
-            for i, e in enumerate((self.Entities, self.TileEntities)):
+            self._fakeEntities = defaultdict(lambda: (nbt.TAG_List(), nbt.TAG_List(), nbt.TAG_List()))
+            for i, e in enumerate((self.Entities, self.TileEntities, self.TileTicks)):
                 for ent in e:
-                    x, y, z = [Entity, TileEntity][i].pos(ent)
+                    x, y, z = [Entity, TileEntity, TileTick][i].pos(ent)
                     ecx, ecz = map(lambda x: (int(floor(x)) >> 4), (x, z))
 
                     self._fakeEntities[ecx, ecz][i].append(ent)
@@ -579,7 +614,6 @@ class ChunkBase(EntityLevel):
         cx, cz = self.chunkPosition
         return BoundingBox((cx << 4, 0, cz << 4), self.size)
 
-
     def chunkChanged(self, needsLighting=True):
         self.dirty = True
         self.needsLighting = needsLighting or self.needsLighting
@@ -587,7 +621,6 @@ class ChunkBase(EntityLevel):
     @property
     def materials(self):
         return self.world.materials
-
 
     def getChunkSlicesForBox(self, box):
         """

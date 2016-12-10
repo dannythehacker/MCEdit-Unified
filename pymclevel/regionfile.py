@@ -79,7 +79,7 @@ class MCRegionFile(object):
             for i in xrange(sector, sector + count):
                 if i >= len(self.freeSectors):
                     # raise RegionMalformed("Region file offset table points to sector {0} (past the end of the file)".format(i))
-                    print  "Region file offset table points to sector {0} (past the end of the file)".format(i)
+                    print "Region file offset table points to sector {0} (past the end of the file)".format(i)
                     needsRepair = True
                     break
                 if self.freeSectors[i] is False:
@@ -173,7 +173,6 @@ class MCRegionFile(object):
         log.info("Repair complete. Removed {0} chunks, recovered {1} chunks, net {2}".format(deleted, recovered,
                                                                                              recovered - deleted))
 
-
     def _readChunk(self, cx, cz):
         cx &= 0x1f
         cz &= 0x1f
@@ -193,7 +192,7 @@ class MCRegionFile(object):
             f.seek(sectorStart * self.SECTOR_BYTES)
             data = f.read(numSectors * self.SECTOR_BYTES)
         if len(data) < 5:
-            raise RegionMalformed, "Chunk data is only %d bytes long (expected 5)" % len(data)
+            raise RegionMalformed("Chunk data is only %d bytes long (expected 5)" % len(data))
 
         # log.debug("REGION LOAD {0},{1} sector {2}".format(cx, cz, sectorStart))
 

@@ -7,35 +7,27 @@ import numpy
 
 from mclevelbase import exhaust
 import blockrotation
+from box import BoundingBox
 from entity import TileEntity
 
 
 def blockReplaceTable(blocksToReplace):
     blocktable = numpy.zeros((materials.id_limit, 16), dtype='bool')
     for b in blocksToReplace:
-        if b.hasVariants:
             blocktable[b.ID, b.blockData] = True
-        else:
-            blocktable[b.ID] = True
-
     return blocktable
 
 
-def fillBlocks(level, box, blockInfo, blocksToReplace=()):
-    return exhaust(level.fillBlocksIter(box, blockInfo, blocksToReplace))
+def fillBlocks(level, box, blockInfo, blocksToReplace=(), noData=False):
+    return exhaust(level.fillBlocksIter(box, blockInfo, blocksToReplace, noData=noData))
 
 
-def fillBlocksIter(level, box, blockInfo, blocksToReplace=()):
+def fillBlocksIter(level, box, blockInfo, blocksToReplace=(), noData=False):
     if box is None:
         chunkIterator = level.getAllChunkSlices()
         box = level.bounds
     else:
         chunkIterator = level.getChunkSlices(box)
-
-    # shouldRetainData = (not blockInfo.hasVariants and not any([b.hasVariants for b in blocksToReplace]))
-    # if shouldRetainData:
-    # log.info( "Preserving data bytes" )
-    shouldRetainData = False  # xxx old behavior overwrote blockdata with 0 when e.g. replacing water with lava
 
     log.info("Replacing {0} with {1}".format(blocksToReplace, blockInfo))
 
@@ -43,7 +35,6 @@ def fillBlocksIter(level, box, blockInfo, blocksToReplace=()):
     blocktable = None
     if len(blocksToReplace):
         blocktable = blockReplaceTable(blocksToReplace)
-        shouldRetainData = all([blockrotation.SameRotationType(blockInfo, b) for b in blocksToReplace])
 
         newAbsorption = level.materials.lightAbsorption[blockInfo.ID]
         oldAbsorptions = [level.materials.lightAbsorption[b.ID] for b in blocksToReplace]
@@ -57,6 +48,20 @@ def fillBlocksIter(level, box, blockInfo, blocksToReplace=()):
         for a in oldEmissions:
             if a != newEmission:
                 changesLighting = True
+
+    tileEntity = None
+    if blockInfo.stringID in TileEntity.stringNames.keys():
+        tileEntity = TileEntity.stringNames[blockInfo.stringID]
+
+    blocksIdToReplace = [block.ID for block in blocksToReplace]
+
+    blocksList = []
+    if tileEntity and box is not None:
+        for (boxX, boxY, boxZ) in box.positions:
+            if blocktable is None or level.blockAt(boxX, boxY, boxZ) in blocksIdToReplace:
+                tileEntityObject = TileEntity.Create(tileEntity)
+                TileEntity.setpos(tileEntityObject, (boxX, boxY, boxZ))
+                blocksList.append(tileEntityObject)
 
     i = 0
     skipped = 0
@@ -83,7 +88,7 @@ def fillBlocksIter(level, box, blockInfo, blocksToReplace=()):
             # don't waste time relighting and copying if the mask is empty
             if blockCount:
                 blocks[:][mask] = blockInfo.ID
-                if not shouldRetainData:
+                if not noData:
                     data[mask] = blockInfo.blockData
             else:
                 skipped += 1
@@ -98,10 +103,18 @@ def fillBlocksIter(level, box, blockInfo, blocksToReplace=()):
 
         else:
             blocks[:] = blockInfo.ID
-            if not shouldRetainData:
+            if not noData:
                 data[:] = blockInfo.blockData
             chunk.removeTileEntitiesInBox(box)
 
+        chunkBounds = chunk.bounds
+        smallBoxSize = (1, 1, 1)
+        tileEntitiesToEdit = [t for t in blocksList if chunkBounds.intersect(BoundingBox(TileEntity.pos(t), smallBoxSize)).volume > 0]
+
+        for tileEntityObject in tileEntitiesToEdit:
+            chunk.addTileEntity(tileEntityObject)
+            blocksList.remove(tileEntityObject)
+        
         chunk.chunkChanged(needsLighting)
 
     if len(blocksToReplace):
